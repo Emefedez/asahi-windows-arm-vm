@@ -54,6 +54,8 @@ Plus host folder sharing (virtio-fs → drive letters), USB passthrough, an Omar
   drivers for emulated x64 apps, and every driver bug found along the way.
 - **[docs/display-and-input.md](docs/display-and-input.md)**: resize, HiDPI, hardware cursor, 120 Hz.
 - **[docs/lessons-learned.md](docs/lessons-learned.md)**: the gotchas, in one list.
+- **[docs/system-changes.md](docs/system-changes.md)**: every root-level change (packages, firmware, tuned,
+  systemd, udev, binfmt), the script that makes it and how to undo it.
 
 ## Repository layout
 
@@ -69,6 +71,8 @@ vm/guest/tools/       in-guest test tools (WebGL checks, Edge DevTools driver, G
 frontend/             Omarchy menu, "Windows VM Manager" Tk app, desktop entry, menu snippet
 patches/              Mesa (virtio-win-mesa) and Yttrium kernel-driver patches, with their base commits
 build/                llvm-mingw cross files, ARM64X link scripts, version resource, test probes (C)
+system/              package list, UEFI firmware installer, FEX-2609 binfmt setup (root-level pieces)
+install-system.sh     runs every root-level step (see docs/system-changes.md)
 install-user.sh       copies the user-level pieces into ~/VMs/windows-arm and ~/.local
 ```
 
@@ -77,15 +81,16 @@ install-user.sh       copies the user-level pieces into ~/VMs/windows-arm and ~/
 ```bash
 git clone https://github.com/Emefedez/asahi-windows-arm-vm && cd asahi-windows-arm-vm
 
-# muvm GPU fix only (no root): uclamp wrapper for muvm
-install -m755 muvm/muvm ~/.local/bin/muvm
+# Root-level part: packages, UEFI firmware, Performance power profile + VM governor, USB access
+#   (add --fex <fex-build dir> to also make FEX-2609 the x86 interpreter; see docs/system-changes.md)
+sudo ./install-system.sh
 
-# Performance power profile + governor boost while VMs run (root; --undo restores power-profiles-daemon)
-sudo power-profiles/install.sh
-
-# Windows VM scripts and frontend (user level)
+# User-level part: muvm wrapper, Windows VM scripts and frontend
 ./install-user.sh
 ```
+
+Only want the muvm GPU fix? `install -m755 muvm/muvm ~/.local/bin/muvm` (no root) gets the uclamp half, and
+`sudo power-profiles/install.sh` adds the governor half.
 
 Then follow [docs/windows-vm.md](docs/windows-vm.md) to install Windows and
 [docs/gpu-paravirtualization.md](docs/gpu-paravirtualization.md) to build the 3D driver.

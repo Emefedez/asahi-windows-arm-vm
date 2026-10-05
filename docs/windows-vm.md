@@ -18,9 +18,10 @@ Not in the repo (you create or download them): `disk.qcow2` (created on first st
 
 ## Host requirements (Arch Linux ARM)
 
-`qemu-system-aarch64`, `qemu-ui-gtk`, `qemu-hw-display-virtio-gpu*`, `virglrenderer` (1.3+, Venus), `swtpm`,
-`edk2-aarch64` (AAVMF firmware), `socat`, `virtiofsd` (shared folders), `util-linux` (`uclampset`,
-`taskset`), `python` + `tk` (manager). KVM must be available (`/dev/kvm`).
+`sudo system/packages.sh vm` installs the QEMU modules, swtpm, virtiofsd, virglrenderer (1.3+ for Venus),
+socat and tk. `sudo system/install-edk2-aarch64.sh` installs the AAVMF UEFI firmware, which Arch Linux ARM
+doesn't package. It uses Arch's signature-checked `any` package. KVM must be available (`/dev/kvm`).
+Everything root-level is listed in [system-changes.md](system-changes.md).
 
 ## Install Windows
 
