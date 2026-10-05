@@ -12,8 +12,10 @@ Omarchy/Hyprland)** to do three things well:
    (through vkd3d-proton) on the M1 Max GPU, for **native ARM64 and emulated x64 apps**. It also has a desktop
    frontend.
 
-Everything here was measured on one machine. Treat it as a field report with working code, not a polished
-product.
+https://github.com/user-attachments/assets/3a4ec4a0-c4d5-45c4-a2b5-062b995319b5
+
+
+Everything here was measured on one machine. 
 
 | | |
 |---|---|
