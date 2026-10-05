@@ -1,0 +1,69 @@
+#!/bin/bash
+# Switch cpufreq to the performance governor while a VM that needs it is running:
+#   - any muvm microVM ("libkrun VM" process), always;
+#   - the Windows ARM QEMU VM (~/VMs/windows-arm/win-arm.sh) when its owner selected the
+#     "performance" profile: win-arm.sh writes /run/user/<uid>/win-arm.perf.
+#
+# The VMM's GPU worker and vCPU threads sit on the critical path of every guest GPU
+# submission but each looks only partly busy, so schedutil keeps the CPU slow, the GPU
+# starves and its firmware DVFS clocks it down as well.
+# Measured on M1 Max (glmark2 terrain in the muvm DRM guest): 318 FPS schedutil,
+# 463 with uclamp.min=1024, 522 with this. Settings: /etc/default/muvm-perf-governor
+set -u
+GOVERNOR=performance
+POLICIES="/sys/devices/system/cpu/cpufreq/policy*"
+INTERVAL=2
+[[ -r /etc/default/muvm-perf-governor ]] && . /etc/default/muvm-perf-governor
+
+declare -A saved=()
+boosted=0
+reason=""
+
+wanted() {
+  # libkrun renames the VMM process to "libkrun VM".
+  if pgrep -x 'libkrun VM' >/dev/null; then reason=muvm; return 0; fi
+  local pid uid req
+  for pid in $(pgrep -f '^qemu-system-aarch64 -name win-arm( |$)'); do
+    uid=$(stat -c %u "/proc/$pid" 2>/dev/null) || continue
+    req=/run/user/$uid/win-arm.perf
+    # Only trust a regular file owned by the VM's owner, with an exact known value.
+    [[ -f $req && ! -L $req && $(stat -c %u "$req") == "$uid" ]] || continue
+    [[ $(head -c 32 "$req") == performance ]] && { reason=win-arm; return 0; }
+  done
+  return 1
+}
+
+boost() {
+  local p
+  for p in $POLICIES; do
+    saved[$p]=$(<"$p/scaling_governor")
+    echo "$GOVERNOR" >"$p/scaling_governor"
+  done
+  boosted=1
+  echo "$reason VM running: cpufreq governor -> $GOVERNOR"
+}
+
+restore() {
+  local p active
+  # With tuned (tuned-ppd backs the desktop power profile), re-apply the profile that is active
+  # now: the user may have switched profiles while the VM was running.
+  if systemctl -q is-active tuned 2>/dev/null &&
+     active=$(tuned-adm active 2>/dev/null | sed -n 's/^Current active profile: //p') && [[ -n $active ]]; then
+    tuned-adm profile "$active"
+  else
+    for p in "${!saved[@]}"; do echo "${saved[$p]}" >"$p/scaling_governor"; done
+  fi
+  saved=(); boosted=0
+  echo "no VM needs boosting: cpufreq governor restored"
+}
+
+trap '(( boosted )) && restore; exit 0' TERM INT
+
+while :; do
+  if wanted; then
+    (( boosted )) || boost
+  else
+    (( boosted )) && restore
+  fi
+  sleep "$INTERVAL" & wait $!
+done

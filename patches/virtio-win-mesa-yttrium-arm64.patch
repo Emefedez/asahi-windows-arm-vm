@@ -1,0 +1,382 @@
+diff --git i/meson.build w/meson.build
+index ab5b21f..bb507b5 100644
+--- i/meson.build
++++ w/meson.build
+@@ -1335,7 +1335,10 @@ else
+   # own sections and GC the sections after linking.  This lets drivers
+   # drop shared code unused by that specific driver (particularly
+   # relevant for Vulkan drivers).
+-  if cc.links('static char unused() { return 5; } int main() { return 0; }',
++  # lld's --gc-sections drops ARM64EC code reached only through the x64-visible
++  # alias of a "#name" function (e.g. Vulkan entrypoint tables), gutting the driver.
++  if cc.get_define('__arm64ec__') == '' and \
++     cc.links('static char unused() { return 5; } int main() { return 0; }',
+               args : '-Wl,--gc-sections', name : 'gc-sections')
+     ld_args_gc_sections += '-Wl,--gc-sections'
+     _trial_c += ['-ffunction-sections', '-fdata-sections']
+diff --git i/src/gallium/frontends/d3d10umd/Debug.cpp w/src/gallium/frontends/d3d10umd/Debug.cpp
+index 648761c..75ed962 100644
+--- i/src/gallium/frontends/d3d10umd/Debug.cpp
++++ w/src/gallium/frontends/d3d10umd/Debug.cpp
+@@ -151,7 +151,7 @@ AssertFail(const char *expr,
+    yttrium_gdi_trace_errorf("%s:%u:%s: Assertion `%s' failed.\n",
+                             file, line, function, expr);
+    DebugPrintf("%s:%u:%s: Assertion `%s' failed.\n", file, line, function, expr);
+-#if defined(__GNUC__)
++#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__)) && !defined(_M_ARM64EC)
+    __asm("int3");
+ #elif defined(_MSC_VER)
+    __debugbreak();
+diff --git i/src/gallium/frontends/d3d10umd/Resource.cpp w/src/gallium/frontends/d3d10umd/Resource.cpp
+index 629388d..4e0079c 100644
+--- i/src/gallium/frontends/d3d10umd/Resource.cpp
++++ w/src/gallium/frontends/d3d10umd/Resource.cpp
+@@ -49,7 +49,7 @@
+ 
+ #include "gallium/winsys/yttrium/gdi/yttrium_gdi_public.h"
+ 
+-#if defined(_M_IX86) || defined(_M_X64) || defined(__i386__) || defined(__x86_64__)
++#if (defined(_M_IX86) || defined(_M_X64) || defined(__i386__) || defined(__x86_64__)) && !defined(_M_ARM64EC)
+ #include <emmintrin.h>
+ #endif
+ #include <string.h>
+@@ -60,7 +60,7 @@
+ static void
+ CopyConstantPublication(void *dst, const void *src, size_t size)
+ {
+-#if defined(_M_IX86) || defined(_M_X64) || defined(__i386__) || defined(__x86_64__)
++#if (defined(_M_IX86) || defined(_M_X64) || defined(__i386__) || defined(__x86_64__)) && !defined(_M_ARM64EC)
+    if (size >= CONSTANT_PUBLICATION_NONTEMPORAL_MIN_SIZE &&
+        !(reinterpret_cast<uintptr_t>(dst) & 15u) && !(size & 15u)) {
+       __m128i *dst_vec = reinterpret_cast<__m128i *>(dst);
+diff --git i/src/gallium/targets/d3d10umd/tests/tri.cpp w/src/gallium/targets/d3d10umd/tests/tri.cpp
+index 33baaed..2bdfdc0 100644
+--- i/src/gallium/targets/d3d10umd/tests/tri.cpp
++++ w/src/gallium/targets/d3d10umd/tests/tri.cpp
+@@ -1866,7 +1866,11 @@ main(int argc, char *argv[])
+              * buffers until something flushes them, so without this fence the
+              * timer stops before the bus has seen the data and WC memory looks
+              * as fast as cached memory. */
++#if (defined(__i386__) || defined(__x86_64__) || defined(_M_IX86) || defined(_M_X64)) && !defined(_M_ARM64EC)
+             _mm_sfence();
++#else
++            MemoryBarrier();
++#endif
+             QueryPerformanceCounter(&t2);
+ 
+             pDeviceContext->Unmap(pUploadBuffer.Get(), 0);
+diff --git i/src/gallium/winsys/yttrium/gdi/yttrium_pipeline.c w/src/gallium/winsys/yttrium/gdi/yttrium_pipeline.c
+index 3ea7b61..578cc99 100644
+--- i/src/gallium/winsys/yttrium/gdi/yttrium_pipeline.c
++++ w/src/gallium/winsys/yttrium/gdi/yttrium_pipeline.c
+@@ -6346,13 +6346,16 @@ yttrium_pipeline_try_draw(struct pipe_context *ctx,
+       yctx->dsa && yctx->dsa->state.depth_enabled;
+    const bool depth_bounds_enabled =
+       yctx->dsa && yctx->dsa->state.depth_bounds_test;
+-   const bool stencil_enabled =
+-      yctx->dsa &&
+-      (yctx->dsa->state.stencil[0].enabled ||
+-       yctx->dsa->state.stencil[1].enabled);
+    struct yttrium_resource *zs =
+       yctx->fb.zsbuf.texture ? yttrium_resource(yctx->fb.zsbuf.texture) :
+       NULL;
++   /* D3D: with no stencil in the bound depth buffer the stencil test passes. The pipeline is
++    * created with the stencil test disabled for such attachments, so do not drop the draw. */
++   const bool stencil_enabled =
++      yctx->dsa &&
++      (yctx->dsa->state.stencil[0].enabled ||
++       yctx->dsa->state.stencil[1].enabled) &&
++      !(zs && !yttrium_pipeline_format_has_stencil(zs->venus.vk_format));
+ 
+    if (depth_bounds_enabled && zs) {
+       YTTRIUM_WARN("yttrium: shader_draw_probe try_draw skipped depth bounds unsupported zsbuf=%p\n",
+diff --git i/src/gallium/winsys/yttrium/gdi/yttrium_resource.c w/src/gallium/winsys/yttrium/gdi/yttrium_resource.c
+index 3b85028..386ae41 100644
+--- i/src/gallium/winsys/yttrium/gdi/yttrium_resource.c
++++ w/src/gallium/winsys/yttrium/gdi/yttrium_resource.c
+@@ -4808,7 +4808,17 @@ unsupported:
+    return;
+ 
+ copied:
+-   if (buffer_copy && ydst->gpu_buffer_written && ydst->data &&
++   /* A stream-output-capable buffer (ANGLE binds every vertex buffer this way) keeps a
++    * device-local Venus buffer and a detached CPU shadow that draws never re-upload. Like the
++    * transfer-unmap path, publish the copied range now; leaving it only in the shadow made
++    * CopySubresourceRegion(staging -> vertex buffer) invisible to draws (WebGL static buffers
++    * rendered nothing). */
++   const bool detached_stream_output_dst =
++      buffer_copy && (ydst->base.bind & PIPE_BIND_STREAM_OUTPUT) &&
++      ydst->venus.initialized && ydst->venus.buffer_backed &&
++      !yttrium_resource_uses_mapped_venus_buffer(ydst);
++   if (buffer_copy && (ydst->gpu_buffer_written || detached_stream_output_dst) &&
++       ydst->data &&
+        (copy_path == YTTRIUM_TRACE_COPY_CPU_TO_CPU ||
+         copy_path == YTTRIUM_TRACE_COPY_BUFFER_TO_CPU)) {
+       /* Ordered uploader writes carry only this byte range.  Do not publish
+diff --git i/src/gallium/winsys/yttrium/gdi/yttrium_venus2_batch.c w/src/gallium/winsys/yttrium/gdi/yttrium_venus2_batch.c
+index b5c55a4..3dfe1c5 100644
+--- i/src/gallium/winsys/yttrium/gdi/yttrium_venus2_batch.c
++++ w/src/gallium/winsys/yttrium/gdi/yttrium_venus2_batch.c
+@@ -3707,6 +3707,20 @@ yttrium_venus_wait_resource_batches(struct yttrium_venus *venus,
+    if (!venus || !resource)
+       return true;
+ 
++   /* The open command batch is not a busy batch yet: draws recorded (or deferred) since the last
++    * flush still read this resource. A CPU write after this wait (buffer_subdata, a write map)
++    * must not change what those draws see, so submit the batch first and wait for it below.
++    * Without this, D3D11 UpdateSubresource on a vertex buffer between draws made every earlier
++    * draw of the batch use the last uploaded vertices (WebGL scenes rendered as exploded geometry).
++    */
++   for (uint32_t i = 0; i < venus->cmd_batch_pending_resource_count; i++) {
++      if (venus->cmd_batch_pending_resources[i] == resource) {
++         if (!yttrium_venus_flush_command_batch(venus, label))
++            ok = false;
++         break;
++      }
++   }
++
+    if (!yttrium_venus_flush_pending_submits(venus, label))
+       ok = false;
+ 
+diff --git i/src/gallium/winsys/yttrium/gdi/yttrium_venus2_format.c w/src/gallium/winsys/yttrium/gdi/yttrium_venus2_format.c
+index ed2a84d..bc8084c 100644
+--- i/src/gallium/winsys/yttrium/gdi/yttrium_venus2_format.c
++++ w/src/gallium/winsys/yttrium/gdi/yttrium_venus2_format.c
+@@ -9,9 +9,28 @@
+ #include "util/u_math.h"
+ #include "yttrium_venus2_private.h"
+ 
++/* Set at device init when the host cannot use D24 depth formats as depth/stencil attachments
++ * (e.g. Apple GPUs/Honeykrisp, which only expose D16, D32 and D32_S8). Z24 resources are then
++ * backed by D32 formats everywhere (resources and views), like zink does.
++ */
++bool yttrium_venus2_emulate_d24;
++
+ VkFormat
+ yttrium_venus2_pipe_format(enum pipe_format format)
+ {
++   if (yttrium_venus2_emulate_d24) {
++      switch (format) {
++      case PIPE_FORMAT_Z24X8_UNORM:
++      case PIPE_FORMAT_X8Z24_UNORM:
++         return VK_FORMAT_D32_SFLOAT;
++      case PIPE_FORMAT_Z24_UNORM_S8_UINT:
++      case PIPE_FORMAT_S8_UINT_Z24_UNORM:
++         return VK_FORMAT_D32_SFLOAT_S8_UINT;
++      default:
++         break;
++      }
++   }
++
+    switch (format) {
+    case PIPE_FORMAT_B8G8R8A8_UNORM:
+    case PIPE_FORMAT_B8G8R8X8_UNORM:
+diff --git i/src/gallium/winsys/yttrium/gdi/yttrium_venus2_impl.c w/src/gallium/winsys/yttrium/gdi/yttrium_venus2_impl.c
+index 0653b07..c45b974 100644
+--- i/src/gallium/winsys/yttrium/gdi/yttrium_venus2_impl.c
++++ w/src/gallium/winsys/yttrium/gdi/yttrium_venus2_impl.c
+@@ -977,6 +977,20 @@ yttrium_venus_create_device_objects(struct yttrium_venus *venus)
+       venus->uniform_buffer_offset_alignment = 256;
+    venus->depth_bias_control =
+       have_depth_bias_control_ext && depth_bias_control.depthBiasControl;
++   {
++      VkFormatProperties2 d24_props = {
++         .sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
++      };
++      vn_call_vkGetPhysicalDeviceFormatProperties2(
++         &venus->vn_ring, venus->physical_device,
++         VK_FORMAT_D24_UNORM_S8_UINT, &d24_props);
++      yttrium_venus2_emulate_d24 =
++         !(d24_props.formatProperties.optimalTilingFeatures &
++           VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
++      YTTRIUM_LOG("yttrium: host D24S8 depth attachments %s\n",
++                  yttrium_venus2_emulate_d24 ? "unsupported, using D32 backing"
++                                             : "supported");
++   }
+    venus->transform_feedback =
+       have_transform_feedback_ext && transform_feedback.transformFeedback;
+    venus->vertex_attribute_instance_rate_divisor =
+@@ -3811,8 +3825,9 @@ yttrium_venus2_pipeline_init(struct yttrium_venus *venus,
+                           VK_FALSE,
+       .depthCompareOp = draw_state->depth_compare_op,
+       .depthBoundsTestEnable = VK_FALSE,
+-      .stencilTestEnable = has_depth ? draw_state->stencil_test_enable :
+-                           VK_FALSE,
++      .stencilTestEnable =
++         has_depth && yttrium_venus_format_has_stencil(depth_resource->vk_format) ?
++            draw_state->stencil_test_enable : VK_FALSE,
+       .front = draw_state->stencil_front,
+       .back = draw_state->stencil_back,
+       .minDepthBounds = 0.0f,
+diff --git i/src/gallium/winsys/yttrium/gdi/yttrium_venus2_private.h w/src/gallium/winsys/yttrium/gdi/yttrium_venus2_private.h
+index 7290fc4..7af20de 100644
+--- i/src/gallium/winsys/yttrium/gdi/yttrium_venus2_private.h
++++ w/src/gallium/winsys/yttrium/gdi/yttrium_venus2_private.h
+@@ -926,6 +926,8 @@ yttrium_venus2_wait_resource(struct yttrium_venus *venus,
+                              struct yttrium_venus_resource *resource,
+                              const char *label);
+ 
++extern bool yttrium_venus2_emulate_d24;
++
+ VkFormat
+ yttrium_venus2_pipe_format(enum pipe_format format);
+ 
+diff --git i/src/util/detect_arch.h w/src/util/detect_arch.h
+index e32de8d..f522d47 100644
+--- i/src/util/detect_arch.h
++++ w/src/util/detect_arch.h
+@@ -58,9 +58,10 @@
+ #define DETECT_ARCH_X86 1
+ #endif
+ 
+-#if defined(__x86_64__) /* gcc */ || \
++/* ARM64EC (clang/mingw) also defines __x86_64__, but the code is AArch64. */
++#if (defined(__x86_64__) && !defined(__arm64ec__)) /* gcc */ || \
+     ((defined(_M_X64) || defined(_M_AMD64)) && !defined(_M_ARM64EC)) /* msvc */ || \
+-    defined(__x86_64) /* Sun cc */
++    (defined(__x86_64) && !defined(__arm64ec__)) /* Sun cc */
+ #define DETECT_ARCH_X86_64 1
+ #endif
+ 
+@@ -87,11 +88,11 @@
+ #define DETECT_ARCH_ARM 1
+ #endif
+ 
+-#if defined(__aarch64__) || defined(_M_ARM64) || defined(_M_ARM64EC)
++#if defined(__aarch64__) || defined(_M_ARM64) || defined(_M_ARM64EC) || defined(__arm64ec__)
+ #define DETECT_ARCH_AARCH64 1
+ #endif
+ 
+-#if defined(_M_ARM64EC)
++#if defined(_M_ARM64EC) || defined(__arm64ec__)
+ #define DETECT_ARCH_ARM64EC 1
+ #endif
+ 
+diff --git i/src/util/os_time.c w/src/util/os_time.c
+index 71fc7e3..9e14c29 100644
+--- i/src/util/os_time.c
++++ w/src/util/os_time.c
+@@ -90,6 +90,26 @@ os_time_sleep(int64_t usecs)
+    usleep(usecs);
+ 
+ #elif DETECT_OS_WINDOWS
++   /* Venus polls fence feedback at sub-millisecond intervals. Rounding those
++    * waits to Sleep(1) adds roughly two timer ticks to each queue round trip.
++    * High-resolution timers preserve the requested interval on Windows 10+.
++    */
++   if (usecs > 0 && usecs < 1000) {
++      HANDLE timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002,
++                                          TIMER_MODIFY_STATE | SYNCHRONIZE);
++      if (timer) {
++         LARGE_INTEGER due;
++         due.QuadPart = -usecs * 10;
++         if (SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) {
++            DWORD result = WaitForSingleObject(timer, INFINITE);
++            CloseHandle(timer);
++            if (result == WAIT_OBJECT_0)
++               return;
++         } else {
++            CloseHandle(timer);
++         }
++      }
++   }
+    DWORD dwMilliseconds = (DWORD) ((usecs + 999) / 1000);
+    /* Avoid Sleep(O) as that would cause to sleep for an undetermined duration */
+    if (dwMilliseconds) {
+diff --git i/src/vulkan/util/vk_dispatch_table_gen.py w/src/vulkan/util/vk_dispatch_table_gen.py
+index c2776d2..b3ff732 100644
+--- i/src/vulkan/util/vk_dispatch_table_gen.py
++++ w/src/vulkan/util/vk_dispatch_table_gen.py
+@@ -65,7 +65,14 @@ TEMPLATE_H = Template(COPYRIGHT + """\
+ extern "C" {
+ #endif
+ 
+-#ifdef _MSC_VER
++/* MinGW ARM64EC: weak symbols don't work for the entrypoint tables (the unmangled name of an EC
++ * function is itself only a weak alias of "#name", so the NULL fallback wins). Use the MSVC
++ * /alternatename stub scheme there as well. */
++#if !defined(VK_ENTRY_USE_ALTNAME) && (defined(_MSC_VER) || (defined(__MINGW32__) && defined(_M_ARM64EC)))
++#define VK_ENTRY_USE_ALTNAME 1
++#endif
++
++#ifdef VK_ENTRY_USE_ALTNAME
+ VKAPI_ATTR void VKAPI_CALL vk_entrypoint_stub(void);
+ #endif
+ 
+@@ -567,7 +574,7 @@ vk_device_entrypoint_is_enabled(int index, uint32_t core_version,
+    }
+ }
+ 
+-#ifdef _MSC_VER
++#ifdef VK_ENTRY_USE_ALTNAME
+ VKAPI_ATTR void VKAPI_CALL vk_entrypoint_stub(void)
+ {
+    UNREACHABLE("Entrypoint not implemented");
+@@ -609,7 +616,7 @@ void vk_${type}_dispatch_table_from_entrypoints(
+     if (overwrite) {
+         memset(dispatch_table, 0, sizeof(*dispatch_table));
+         for (unsigned i = 0; i < ARRAY_SIZE(${type}_compaction_table); i++) {
+-#ifdef _MSC_VER
++#ifdef VK_ENTRY_USE_ALTNAME
+             assert(entry[i] != NULL);
+             if (vk_function_is_stub(entry[i]))
+ #else
+@@ -623,7 +630,7 @@ void vk_${type}_dispatch_table_from_entrypoints(
+     } else {
+         for (unsigned i = 0; i < ARRAY_SIZE(${type}_compaction_table); i++) {
+             unsigned disp_index = ${type}_compaction_table[i];
+-#ifdef _MSC_VER
++#ifdef VK_ENTRY_USE_ALTNAME
+             assert(entry[i] != NULL);
+             if (disp[disp_index] == NULL && !vk_function_is_stub(entry[i]))
+ #else
+diff --git i/src/vulkan/util/vk_entrypoints_gen.py w/src/vulkan/util/vk_entrypoints_gen.py
+index 9dbe00e..a76515b 100644
+--- i/src/vulkan/util/vk_entrypoints_gen.py
++++ w/src/vulkan/util/vk_entrypoints_gen.py
+@@ -59,7 +59,13 @@ extern "C" {
+  * On MSVC, weak symbols are not well supported, so we use the functionally
+  * equivalent /alternatename.
+  */
+-#if !defined(_MSC_VER) && defined(VK_ENTRY_USE_WEAK)
++/* MinGW ARM64EC: weak symbols don't work for the entrypoint tables (the unmangled name of an EC
++ * function is itself only a weak alias of "#name", so the NULL fallback wins). Use the MSVC
++ * /alternatename stub scheme there as well. */
++#if !defined(VK_ENTRY_USE_ALTNAME) && (defined(_MSC_VER) || (defined(__MINGW32__) && defined(_M_ARM64EC)))
++#define VK_ENTRY_USE_ALTNAME 1
++#endif
++#if !defined(VK_ENTRY_USE_ALTNAME) && defined(VK_ENTRY_USE_WEAK)
+ #define VK_ENTRY_WEAK __attribute__ ((weak))
+ #else
+ #define VK_ENTRY_WEAK
+@@ -174,8 +180,10 @@ TEMPLATE_C = Template(COPYRIGHT + """
+ #ifdef ${e.guard}
+     % endif
+     % for p in prefixes:
+-#ifdef _MSC_VER
+-#ifdef _M_IX86
++#ifdef VK_ENTRY_USE_ALTNAME
++#if defined(__MINGW32__)
++    __asm__(".section .drectve,\\"yn\\"\\n.ascii \\" -alternatename:${p}_${e.name}=vk_entrypoint_stub -alternatename:#${p}_${e.name}=#vk_entrypoint_stub\\"\\n.text");
++#elif defined(_M_IX86)
+       % for args_size in [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 60, 104]:
+     #pragma comment(linker, "/alternatename:_${p}_${e.name}@${args_size}=_vk_entrypoint_stub@0")
+       % endfor
+@@ -209,7 +217,7 @@ const struct vk_${type}_entrypoint_table ${p}_${type}_entrypoints = {
+     % endif
+     .${e.name} = ${p}_${e.name},
+     % if e.guard is not None:
+-#elif defined(_MSC_VER)
++#elif defined(VK_ENTRY_USE_ALTNAME)
+     .${e.name} = (PFN_vkVoidFunction)vk_entrypoint_stub,
+ #endif // ${e.guard}
+     % endif
+@@ -226,7 +234,7 @@ const struct vk_${type}_entrypoint_table ${tmpl_prefix}_${type}_entrypoints_${en
+     % endif
+     .${e.name} = ${tmpl_prefix}_${e.name}${v},
+     % if e.guard is not None:
+-#elif defined(_MSC_VER)
++#elif defined(VK_ENTRY_USE_ALTNAME)
+     .${e.name} = (PFN_vkVoidFunction)vk_entrypoint_stub,
+ #endif // ${e.guard}
+     % endif

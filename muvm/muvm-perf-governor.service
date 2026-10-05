@@ -1,0 +1,9 @@
+[Unit]
+Description=Performance cpufreq governor while a muvm microVM runs
+
+[Service]
+ExecStart=/usr/local/bin/muvm-perf-governor
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

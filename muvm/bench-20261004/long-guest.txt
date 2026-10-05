@@ -1,0 +1,14 @@
+=======================================================
+    glmark2 2023.01
+=======================================================
+    OpenGL Information
+    GL_VENDOR:      Mesa
+    GL_RENDERER:    Apple M1 Max (G13C C0)
+    GL_VERSION:     4.6 (Compatibility Profile) Mesa 26.2.3-arch1.1
+    Surface Config: buf=32 r=8 g=8 b=8 a=8 depth=32 stencil=0 samples=0
+    Surface Size:   2560x1600 windowed
+=======================================================
+[terrain] duration=25: FPS: 525 FrameTime: 1.908 ms
+=======================================================
+                                  glmark2 Score: 524 
+=======================================================

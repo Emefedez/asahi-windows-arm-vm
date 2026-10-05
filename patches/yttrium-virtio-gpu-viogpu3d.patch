@@ -1,0 +1,1393 @@
+diff -ruN a/viogpu/viogpu3d/driver.cpp b/viogpu/viogpu3d/driver.cpp
+--- a/viogpu/viogpu3d/driver.cpp	2026-10-05 09:01:42.128677642 +0200
++++ b/viogpu/viogpu3d/driver.cpp	2026-10-05 00:05:54.252628741 +0200
+@@ -629,7 +629,6 @@
+ {
+     PAGED_CODE();
+     VIOGPU_ASSERT_CHK(hAdapter != NULL);
+-    UNREFERENCED_PARAMETER(pSetPointerPosition);
+     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
+ 
+     VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(hAdapter);
+@@ -639,7 +638,11 @@
+         VioGpuDbgBreak();
+         return STATUS_UNSUCCESSFUL;
+     }
+-    return STATUS_NOT_IMPLEMENTED;
++    if (!pAdapter->IsPointerEnabled())
++    {
++        return STATUS_NOT_IMPLEMENTED;
++    }
++    return pAdapter->SetPointerPosition(pSetPointerPosition);
+ }
+ 
+ NTSTATUS
+@@ -648,7 +651,6 @@
+ {
+     PAGED_CODE();
+     VIOGPU_ASSERT_CHK(hAdapter != NULL);
+-    UNREFERENCED_PARAMETER(pSetPointerShape);
+     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
+ 
+     VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(hAdapter);
+@@ -658,7 +660,11 @@
+                  ("<---> %s VioGpu (%p) is being called when not active!\n", __FUNCTION__, pAdapter));
+         return STATUS_UNSUCCESSFUL;
+     }
+-    return STATUS_NOT_IMPLEMENTED;
++    if (!pAdapter->IsPointerEnabled())
++    {
++        return STATUS_NOT_IMPLEMENTED;
++    }
++    return pAdapter->SetPointerShape(pSetPointerShape);
+ }
+ 
+ NTSTATUS
+diff -ruN a/viogpu/viogpu3d/viogpu3d_arm64.inx b/viogpu/viogpu3d/viogpu3d_arm64.inx
+--- a/viogpu/viogpu3d/viogpu3d_arm64.inx	2026-10-05 09:01:42.128846143 +0200
++++ b/viogpu/viogpu3d/viogpu3d_arm64.inx	2026-10-05 08:31:11.595732719 +0200
+@@ -94,18 +94,22 @@
+ HKR,,TypesSupported,%REG_DWORD%,7
+ 
+ [VioGpu3D_DeviceSettings]
+-HKR,, HWCursor,                    %REG_DWORD%, 0
++HKR,, HWCursor,                    %REG_DWORD%, 1
+ HKR,, FlexResolution,              %REG_DWORD%, 1
++HKR,, RefreshRate,                 %REG_DWORD%, 60
++HKR,, HWCursorScale,               %REG_DWORD%, 100
+ HKR,, UsePhysicalMemory,           %REG_DWORD%, 0
+ HKR,, UserModeDriverName,          %REG_MULTI_SZ%, %11%\viogpu_d3d10.dll,%11%\viogpu_d3d10.dll,%11%\viogpu_d3d10.dll,%11%\viogpu_d3d10.dll
+ HKR,, OpenGLDriverName,            %REG_MULTI_SZ%, %11%\viogpu_wgl.dll
+ HKR,, OpenGLFlags,                 %REG_DWORD%, 3
+ HKR,, OpenGLVersion,               %REG_DWORD%, 4096
+ HKR,, InstalledDisplayDrivers,     %REG_MULTI_SZ%, viogpu_d3d10,viogpu_d3d10,viogpu_d3d10
++; Venus ICD (ARM64X: native view for ARM64, EC view for x64 apps). Read by the Vulkan loader from the
++; adapter key, which survives driver package swaps (the HKLM\SOFTWARE\Khronos value did not).
++HKR,, VulkanDriverName,            %REG_MULTI_SZ%, %11%\virtio_icd.aarch64.json
+ 
+ 
+ HKLM,"SOFTWARE\Khronos\Vulkan\Drivers","%11%\lvp_icd.aarch64.json",%REG_DWORD%,0
+-HKLM,"SOFTWARE\Khronos\Vulkan\Drivers","%11%\virtio_icd.aarch64.json",%REG_DWORD%,0
+ HKLM,"SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Scheduler",EnablePreemption,%REG_DWORD%,1
+ HKLM,"SYSTEM\CurrentControlSet\Control\GraphicsDrivers",TdrDebugMode,%REG_DWORD%,1
+ 
+diff -ruN a/viogpu/viogpu3d/viogpu_adapter.cpp b/viogpu/viogpu3d/viogpu_adapter.cpp
+--- a/viogpu/viogpu3d/viogpu_adapter.cpp	2026-10-05 09:01:42.128846143 +0200
++++ b/viogpu/viogpu3d/viogpu_adapter.cpp	2026-10-05 04:38:42.098837966 +0200
+@@ -800,13 +800,15 @@
+                 pDriverCaps->SupportSmoothRotation = FALSE;
+                 pDriverCaps->SupportNonVGA = IsVgaDevice();
+ 
+-                // Disable pointer on viogpu3d for now
+-                // if (IsPointerEnabled()) {
+-                //    pDriverCaps->MaxPointerWidth = POINTER_SIZE;
+-                //    pDriverCaps->MaxPointerHeight = POINTER_SIZE;
+-                //    pDriverCaps->PointerCaps.Value = 0;
+-                //    pDriverCaps->PointerCaps.Color = 1;
+-                //}
++                // Hardware cursor (registry HWCursor=1): 64x64 32-bpp color shapes; see SetPointerShape.
++                if (IsPointerEnabled())
++                {
++                    pDriverCaps->MaxPointerWidth = POINTER_SIZE;
++                    pDriverCaps->MaxPointerHeight = POINTER_SIZE;
++                    pDriverCaps->PointerCaps.Value = 0;
++                    pDriverCaps->PointerCaps.Color = 1;
++                    pDriverCaps->PointerCaps.Monochrome = 1;
++                }
+ 
+                 DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s Driver caps return\n", __FUNCTION__));
+                 return STATUS_SUCCESS;
+@@ -2440,6 +2442,20 @@
+     }
+ 
+     value = 0;
++    Status = ReadRegistryDWORD(DevInstRegKeyHandle, L"HWCursorScale", &value);
++    if (NT_SUCCESS(Status) && value)
++    {
++        m_CursorScale = value <= 25 ? 25 : (value <= 50 ? 50 : 100);
++    }
++
++    value = 0;
++    Status = ReadRegistryDWORD(DevInstRegKeyHandle, L"RefreshRate", &value);
++    if (NT_SUCCESS(Status) && value)
++    {
++        m_RefreshRate = value < 30 ? 30 : (value > 240 ? 240 : value);
++    }
++
++    value = 0;
+     Status = ReadRegistryDWORD(DevInstRegKeyHandle, L"UsePhysicalMemory", &value);
+     if (NT_SUCCESS(Status))
+     {
+@@ -2628,6 +2644,17 @@
+                                                                       NULL,
+                                                                       messageNumber,
+                                                                       &callbackRet);
++        if (status == STATUS_DELETE_PENDING || status == STATUS_DEVICE_REMOVED)
++        {
++            // dxgkrnl already disconnected the interrupt (seen when a TDR reset tears the adapter
++            // down): no ISR can run any more, which is all this barrier has to guarantee.
++            DbgPrint(TRACE_LEVEL_WARNING,
++                     ("%s message=%lu interrupt already disconnected (status=0x%x)\n",
++                      __FUNCTION__,
++                      messageNumber,
++                      status));
++            continue;
++        }
+         if (!NT_SUCCESS(status) || !callbackRet)
+         {
+             DbgPrint(TRACE_LEVEL_FATAL,
+@@ -2707,7 +2734,8 @@
+     {
+         DbgPrint(TRACE_LEVEL_ERROR, ("NotifyResolutionEvent\n"));
+         KeSetEvent(m_ResolutionEvent, IO_NO_INCREMENT, FALSE);
+-        KeClearEvent(m_ResolutionEvent);
++        // The user helper resets the notification before querying the latest
++        // size. Clearing here loses resizes while it is applying a prior mode.
+     }
+ }
+ 
+@@ -2903,11 +2931,10 @@
+     UINT fb_size = (UINT)m_PciResources.GetPciBar(0)->GetSize();
+ 
+     // FIXME
+-#if NTDDI_VERSION > NTDDI_WINBLUE
+-    UINT req_size = 0x1000000;
+-#else
+-    UINT req_size = 0x800000;
+-#endif
++    // Fallback framebuffer objects for each mode are carved from this segment (stride x height). 16 MiB
++    // only fits ~4.2 Mpx, so large host windows (e.g. 3024x1964 on a 2x HiDPI MacBook) failed the mode
++    // commit and scanned out garbage (magenta). 64 MiB covers up to 5120x2880 at 32 bpp.
++    UINT req_size = 0x4000000;
+ 
+     if (!IsUsePhysicalMemory() || fb_pa.QuadPart == 0 || fb_size < req_size)
+     {
+@@ -2924,9 +2951,18 @@
+         return status;
+     }
+ 
++    if (!m_CursorSegment.Init(POINTER_SIZE * POINTER_SIZE * 4, NULL))
++    {
++        DbgPrint(TRACE_LEVEL_FATAL, ("%s failed to allocate cursor memory segment\n", __FUNCTION__));
++        frameSegment.Close();
++        VioGpuAdapterClose();
++        return STATUS_INSUFFICIENT_RESOURCES;
++    }
++
+     status = StartWorkThread();
+     if (!NT_SUCCESS(status))
+     {
++        m_CursorSegment.Close();
+         frameSegment.Close();
+         VioGpuAdapterClose();
+         return status;
+@@ -2941,6 +2977,8 @@
+     DbgPrint(TRACE_LEVEL_INFORMATION, ("---> %s\n", __FUNCTION__));
+     StopWorkThread();
+ 
++    DestroyCursor(FALSE);
++    m_CursorSegment.Close();
+     frameSegment.Close();
+ 
+     DbgPrint(TRACE_LEVEL_INFORMATION, ("<--- %s\n", __FUNCTION__));
+@@ -3011,6 +3049,207 @@
+     return updated;
+ }
+ 
++// ---------------------------------------------------------------------------------------------
++// Hardware cursor (ported from viogpudo). Windows hands us the pointer image; we keep it in a 64x64
++// BGRA virtio-gpu resource and send UPDATE_CURSOR / MOVE_CURSOR on the cursor queue. The host then
++// draws the pointer itself (QEMU GTK/SDL use it as the host cursor), independent of the guest frame
++// rate. Only 32-bpp color shapes are accepted; for anything else Windows falls back to its software
++// cursor for that shape.
++
++BOOLEAN VioGpuAdapter::CreateCursor(void)
++{
++    PAGED_CODE();
++
++    const UINT size = POINTER_SIZE * POINTER_SIZE * 4;
++    UINT resid = resourceIdr.GetId();
++    ctrlQueue.CreateResource(resid, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM, POINTER_SIZE, POINTER_SIZE);
++
++    VioGpuObj *obj = new (NonPagedPoolNx) VioGpuObj();
++    if (!obj || !obj->Init(size, &m_CursorSegment) || !vidpn.GpuObjectAttach(resid, obj))
++    {
++        DbgPrint(TRACE_LEVEL_ERROR, ("<--- %s failed to create cursor resource %u\n", __FUNCTION__, resid));
++        delete obj;
++        ctrlQueue.DestroyResource(resid);
++        resourceIdr.PutId(resid);
++        return FALSE;
++    }
++    m_pCursorBuf = obj;
++    return TRUE;
++}
++
++// device_alive=FALSE during driver teardown: the queues are going away and the device reset drops host
++// resources, so only free guest memory. Sending commands there failed and bugchecked (0xE2 'QIVg').
++void VioGpuAdapter::DestroyCursor(BOOLEAN device_alive)
++{
++    PAGED_CODE();
++
++    if (m_pCursorBuf != NULL)
++    {
++        UINT id = (UINT)m_pCursorBuf->GetId();
++        if (device_alive)
++        {
++            ctrlQueue.DetachBacking(id);
++            ctrlQueue.DestroyResource(id);
++        }
++        delete m_pCursorBuf;
++        m_pCursorBuf = NULL;
++        resourceIdr.PutId(id);
++    }
++    m_CursorVisible = FALSE;
++}
++
++// Source pixel (x, y) of the pointer shape as BGRA (memory order B, G, R, A).
++static ULONG CursorSourcePixel(_In_ CONST DXGKARG_SETPOINTERSHAPE *shape, UINT x, UINT y, UINT mono_height)
++{
++    CONST BYTE *src = (CONST BYTE *)shape->pPixels;
++    if (shape->Flags.Color)
++    {
++        return *(CONST ULONG UNALIGNED *)(src + (SIZE_T)y * shape->Pitch + x * 4);
++    }
++    // Monochrome: 1-bpp AND mask rows followed by 1-bpp XOR mask rows (MSB first).
++    const BYTE bit = (BYTE)(0x80 >> (x & 7));
++    const BOOLEAN and_bit = (src[(SIZE_T)y * shape->Pitch + x / 8] & bit) != 0;
++    const BOOLEAN xor_bit = (src[(SIZE_T)(y + mono_height) * shape->Pitch + x / 8] & bit) != 0;
++    if (and_bit && !xor_bit)
++    {
++        return 0x00000000; // transparent
++    }
++    // AND=0: XOR selects white or black. AND=1,XOR=1 ("invert screen") is approximated as black.
++    return (!and_bit && xor_bit) ? 0xFFFFFFFF : 0xFF000000;
++}
++
++BOOLEAN VioGpuAdapter::FillCursor(_In_ CONST DXGKARG_SETPOINTERSHAPE *pSetPointerShape)
++{
++    PAGED_CODE();
++
++    PULONG dst = (PULONG)m_pCursorBuf->GetVirtualAddress();
++    if (!dst || !pSetPointerShape->pPixels)
++    {
++        return FALSE;
++    }
++
++    // Monochrome shapes carry both masks; Height covers both when it is twice the width.
++    UINT src_h = pSetPointerShape->Height;
++    if (pSetPointerShape->Flags.Monochrome && src_h == 2 * pSetPointerShape->Width)
++    {
++        src_h /= 2;
++    }
++    const UINT src_w = pSetPointerShape->Width;
++    const UINT factor = 100 / m_CursorScale; // 1, 2 or 4
++    const UINT out_w = min(src_w / factor, (UINT)POINTER_SIZE);
++    const UINT out_h = min(src_h / factor, (UINT)POINTER_SIZE);
++
++    RtlZeroMemory(dst, POINTER_SIZE * POINTER_SIZE * 4);
++    for (UINT y = 0; y < out_h; y++)
++    {
++        for (UINT x = 0; x < out_w; x++)
++        {
++            // Box filter over factor x factor premultiplied BGRA pixels.
++            ULONG sum[4] = {0, 0, 0, 0};
++            for (UINT dy = 0; dy < factor; dy++)
++            {
++                for (UINT dx = 0; dx < factor; dx++)
++                {
++                    const ULONG p = CursorSourcePixel(pSetPointerShape, x * factor + dx, y * factor + dy, src_h);
++                    for (UINT c = 0; c < 4; c++)
++                    {
++                        sum[c] += (p >> (8 * c)) & 0xFF;
++                    }
++                }
++            }
++            const UINT n = factor * factor;
++            dst[y * POINTER_SIZE + x] = (sum[0] / n) | ((sum[1] / n) << 8) | ((sum[2] / n) << 16) | ((sum[3] / n) << 24);
++        }
++    }
++    return TRUE;
++}
++
++NTSTATUS VioGpuAdapter::SendCursor(UINT32 type, UINT resource_id, LONG x, LONG y)
++{
++    PAGED_CODE();
++
++    PGPU_VBUFFER vbuf = NULL;
++    PGPU_UPDATE_CURSOR crsr = (PGPU_UPDATE_CURSOR)m_CursorQueue.AllocCursor(&vbuf);
++    if (!crsr)
++    {
++        return STATUS_INSUFFICIENT_RESOURCES;
++    }
++    RtlZeroMemory(crsr, sizeof(*crsr));
++    crsr->hdr.type = type;
++    crsr->resource_id = resource_id;
++    crsr->pos.scanout_id = 0;
++    crsr->pos.x = (ULONG)max(x, 0L);
++    crsr->pos.y = (ULONG)max(y, 0L);
++    crsr->hot_x = m_CursorHotX;
++    crsr->hot_y = m_CursorHotY;
++    return m_CursorQueue.QueueCursor(vbuf) == 0 ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
++}
++
++NTSTATUS VioGpuAdapter::SetPointerShape(_In_ CONST DXGKARG_SETPOINTERSHAPE *pSetPointerShape)
++{
++    PAGED_CODE();
++
++    const UINT factor = 100 / m_CursorScale;
++    const BOOLEAN supported = (pSetPointerShape->Flags.Color || pSetPointerShape->Flags.Monochrome) &&
++                              pSetPointerShape->Width / factor <= POINTER_SIZE &&
++                              pSetPointerShape->Height / factor <= 2 * POINTER_SIZE;
++    if (!supported)
++    {
++        // Windows draws this shape with its software cursor: hide ours so the two never overlap.
++        if (m_pCursorBuf != NULL && m_CursorVisible)
++        {
++            m_CursorVisible = FALSE;
++            SendCursor(VIRTIO_GPU_CMD_UPDATE_CURSOR, 0, 0, 0);
++        }
++        return STATUS_UNSUCCESSFUL;
++    }
++    if (m_pCursorBuf == NULL && !CreateCursor())
++    {
++        return STATUS_UNSUCCESSFUL;
++    }
++    if (!FillCursor(pSetPointerShape))
++    {
++        return STATUS_UNSUCCESSFUL;
++    }
++
++    const UINT id = (UINT)m_pCursorBuf->GetId();
++    ctrlQueue.TransferToHost2D(id, 0, POINTER_SIZE, POINTER_SIZE, 0, 0);
++    m_CursorHotX = pSetPointerShape->XHot / factor;
++    m_CursorHotY = pSetPointerShape->YHot / factor;
++    // UPDATE_CURSOR carries the new image; keep it hidden until Windows reports a visible position.
++    return SendCursor(VIRTIO_GPU_CMD_UPDATE_CURSOR, m_CursorVisible ? id : 0, m_CursorX, m_CursorY);
++}
++
++NTSTATUS VioGpuAdapter::SetPointerPosition(_In_ CONST DXGKARG_SETPOINTERPOSITION *pSetPointerPosition)
++{
++    PAGED_CODE();
++
++    if (m_pCursorBuf == NULL)
++    {
++        return STATUS_UNSUCCESSFUL;
++    }
++    if (!pSetPointerPosition->Flags.Visible)
++    {
++        if (!m_CursorVisible)
++        {
++            return STATUS_SUCCESS;
++        }
++        m_CursorVisible = FALSE;
++        // resource_id 0 hides the cursor on the host.
++        return SendCursor(VIRTIO_GPU_CMD_UPDATE_CURSOR, 0, 0, 0);
++    }
++
++    const UINT id = (UINT)m_pCursorBuf->GetId();
++    m_CursorX = pSetPointerPosition->X;
++    m_CursorY = pSetPointerPosition->Y;
++    if (!m_CursorVisible)
++    {
++        m_CursorVisible = TRUE;
++        return SendCursor(VIRTIO_GPU_CMD_UPDATE_CURSOR, id, pSetPointerPosition->X, pSetPointerPosition->Y);
++    }
++    return SendCursor(VIRTIO_GPU_CMD_MOVE_CURSOR, id, pSetPointerPosition->X, pSetPointerPosition->Y);
++}
++
+ NTSTATUS VioGpuAdapter::UpdateChildStatus(BOOLEAN connect)
+ {
+     PAGED_CODE();
+@@ -3069,16 +3308,20 @@
+         UNREFERENCED_PARAMETER(MessageNumber);
+         UCHAR isrstat = virtio_read_isr_status(&m_VioDev);
+ 
+-        switch (isrstat)
++        // The virtio ISR status is a bitmask: bit 0 = queue work, bit 1 = config change.
++        // Matching exact values dropped pure config changes (2, e.g. a host window resize) and
++        // the queue work that arrives together with one (3).
++        if (isrstat & 1)
+         {
+-            case 1:
+-                intReason = (ISR_REASON_DISPLAY | ISR_REASON_CURSOR);
+-                break;
+-            case 3:
+-                intReason = ISR_REASON_CHANGE;
+-                break;
+-            default:
+-                serviced = FALSE;
++            intReason |= (ISR_REASON_DISPLAY | ISR_REASON_CURSOR);
++        }
++        if (isrstat & 2)
++        {
++            intReason |= ISR_REASON_CHANGE;
++        }
++        if (!intReason)
++        {
++            serviced = FALSE;
+         }
+     }
+ 
+@@ -3260,8 +3503,10 @@
+         vidpn.GetDisplayInfo();
+         events_clear |= VIRTIO_GPU_EVENT_DISPLAY;
+         virtio_set_config(&m_VioDev, FIELD_OFFSET(GPU_CONFIG, events_clear), &events_clear, sizeof(m_u32NumScanouts));
+-        //        UpdateChildStatus(FALSE);
+-        //        ProcessEdid();
++        // Re-plug the virtual monitor: Windows asks for monitor modes (RecommendMonitorModes) only when a
++        // monitor arrives. With a plain "still connected" it kept the boot-time monitor mode set and
++        // rejected (DISP_CHANGE_BADMODE) host window sizes larger than the size the VM booted with.
++        UpdateChildStatus(FALSE);
+         UpdateChildStatus(TRUE);
+     }
+ }
+diff -ruN a/viogpu/viogpu3d/viogpu_adapter.h b/viogpu/viogpu3d/viogpu_adapter.h
+--- a/viogpu/viogpu3d/viogpu_adapter.h	2026-10-05 09:01:42.128846143 +0200
++++ b/viogpu/viogpu3d/viogpu_adapter.h	2026-10-05 00:18:37.935115825 +0200
+@@ -78,6 +78,10 @@
+     UINT64 m_u64GuestFeatures;
+     UINT32 m_u32NumCapsets;
+     UINT32 m_u32NumScanouts;
++    ULONG m_RefreshRate = 60;
++    // Registry HWCursorScale (percent): host-side cursor size relative to the guest image. The host
++    // draws one cursor pixel per logical point, so with a 2x-HiDPI display scale of 0.5 this is 50.
++    ULONG m_CursorScale = 100;
+     UINT64 m_supportedCapsetIDs;
+ 
+   private:
+@@ -105,7 +109,16 @@
+     PKEVENT m_ResolutionEvent;
+     HANDLE m_ResolutionEventHandle;
+ 
+-    VioGpuObj *m_pCursorBuf;
++    VioGpuObj *m_pCursorBuf = NULL;
++    ULONG m_CursorHotX = 0;
++    ULONG m_CursorHotY = 0;
++    BOOLEAN m_CursorVisible = FALSE;
++    LONG m_CursorX = 0;
++    LONG m_CursorY = 0;
++    BOOLEAN CreateCursor(void);
++    void DestroyCursor(BOOLEAN device_alive);
++    BOOLEAN FillCursor(_In_ CONST DXGKARG_SETPOINTERSHAPE *pSetPointerShape);
++    NTSTATUS SendCursor(UINT32 type, UINT resource_id, LONG x, LONG y);
+     VioGpuMemSegment m_CursorSegment;
+ 
+ #if VIOGPU_WDDM2
+@@ -181,6 +194,16 @@
+     {
+         return m_Flags.FlexResolution;
+     }
++    // Display refresh rate advertised to Windows and used for the software vsync timer.
++    // Registry "RefreshRate" (device key), default 60, clamped to 30..240.
++    ULONG GetRefreshRate(void) const
++    {
++        return m_RefreshRate;
++    }
++    // Hardware cursor (registry HWCursor=1): the pointer image goes to the host as a virtio-gpu cursor
++    // resource, so the host draws it at its own refresh rate instead of Windows compositing it.
++    NTSTATUS SetPointerShape(_In_ CONST DXGKARG_SETPOINTERSHAPE *pSetPointerShape);
++    NTSTATUS SetPointerPosition(_In_ CONST DXGKARG_SETPOINTERPOSITION *pSetPointerPosition);
+     void SetFlexResolution(BOOLEAN FlexRes)
+     {
+         m_Flags.FlexResolution = FlexRes;
+diff -ruN a/viogpu/viogpu3d/viogpu_allocation.cpp b/viogpu/viogpu3d/viogpu_allocation.cpp
+--- a/viogpu/viogpu3d/viogpu_allocation.cpp	2026-10-05 09:01:42.128846143 +0200
++++ b/viogpu/viogpu3d/viogpu_allocation.cpp	2026-10-04 23:57:40.604798560 +0200
+@@ -102,6 +102,7 @@
+     m_blob_mem = exchange->BlobMem;
+     m_blob_flags = exchange->BlobFlags;
+     m_blob_offset = 0;
++    m_blob_shmem_size = 0;
+     m_blob_shmem_allocated = false;
+     m_blob_map_info = 0;
+     m_blob_mapped = false;
+@@ -351,7 +352,7 @@
+ 
+     if (m_blob_shmem_allocated)
+     {
+-        m_adapter->FreeShmemRange(m_blob_offset, m_blob_size);
++        m_adapter->FreeShmemRange(m_blob_offset, m_blob_shmem_size);
+         m_blob_shmem_allocated = false;
+     }
+ 
+@@ -832,9 +833,13 @@
+                                (allocation->GetBlobFlags() & VIRTGPU_BLOB_FLAG_USE_MAPPABLE);
+     if (mappable_blob)
+     {
+-        ULONGLONG alloc_size = ALIGN_UP_BY(localExchange.Size, PAGE_SIZE);
++        // QEMU maps blobs into the hostmem BAR with mmap(MAP_FIXED) at BAR base + offset, so the
++        // offset must be aligned to the *host* page size, and the slot must cover a whole number of
++        // host pages or the next blob's mapping overlaps it. Hosts with 16 KiB (Apple Silicon /
++        // Asahi) or 64 KiB pages fail with 4 KiB slots; 64 KiB satisfies all of them.
++        ULONGLONG alloc_size = ALIGN_UP_BY(localExchange.Size, VIOGPU_HOSTMEM_ALIGN);
+         ULONGLONG offset = 0;
+-        if (!adapter->AllocateShmemRange(alloc_size, PAGE_SIZE, &offset))
++        if (!adapter->AllocateShmemRange(alloc_size, VIOGPU_HOSTMEM_ALIGN, &offset))
+         {
+             DbgPrint(TRACE_LEVEL_ERROR,
+                      ("<--- %s shmem alloc failed size=0x%llx shmem_len=0x%llx\n",
+@@ -843,6 +848,7 @@
+             return STATUS_INSUFFICIENT_RESOURCES;
+         }
+         allocation->m_blob_offset = offset;
++        allocation->m_blob_shmem_size = alloc_size;
+         allocation->m_blob_shmem_allocated = true;
+     }
+ 
+@@ -916,8 +922,10 @@
+     pDescribeAllocation->MultisampleMethod.NumQualityLevels = 2;
+     pDescribeAllocation->MultisampleMethod.NumSamples = 2;
+ 
+-    pDescribeAllocation->RefreshRate.Numerator = 148500000;
+-    pDescribeAllocation->RefreshRate.Denominator = 2475000;
++    // Must match the refresh of the modes we advertise (RefreshRate registry value): a 60 Hz primary
++    // description under 120 Hz modes left the host showing a magenta scanout.
++    pDescribeAllocation->RefreshRate.Numerator = m_adapter->GetRefreshRate();
++    pDescribeAllocation->RefreshRate.Denominator = 1;
+ 
+     return STATUS_SUCCESS;
+ };
+diff -ruN a/viogpu/viogpu3d/viogpu_allocation.h b/viogpu/viogpu3d/viogpu_allocation.h
+--- a/viogpu/viogpu3d/viogpu_allocation.h	2026-10-05 09:01:42.128846143 +0200
++++ b/viogpu/viogpu3d/viogpu_allocation.h	2026-10-04 20:51:59.572570143 +0200
+@@ -5,6 +5,9 @@
+  */
+ 
+ #pragma once
++
++// Alignment/granularity of blob slots in the hostmem BAR; see VioGpuAllocation creation.
++#define VIOGPU_HOSTMEM_ALIGN (64ULL * 1024)
+ #include "helper.h"
+ #include "virgl_hw.h"
+ #include "viogpum.h"
+@@ -158,6 +161,7 @@
+     ULONG m_blob_mem;
+     ULONG m_blob_flags;
+     ULONGLONG m_blob_offset;
++    ULONGLONG m_blob_shmem_size; // hostmem BAR slot reserved for this blob (VIOGPU_HOSTMEM_ALIGN-rounded)
+     bool m_blob_shmem_allocated;
+     ULONG m_blob_map_info;
+     bool m_blob_mapped;
+diff -ruN a/viogpu/viogpu3d/viogpu_vidpn.cpp b/viogpu/viogpu3d/viogpu_vidpn.cpp
+--- a/viogpu/viogpu3d/viogpu_vidpn.cpp	2026-10-05 09:01:42.129430646 +0200
++++ b/viogpu/viogpu3d/viogpu_vidpn.cpp	2026-10-05 00:30:32.331686956 +0200
+@@ -12,8 +12,11 @@
+ #include "edid.h"
+ #include "trace.h"
+ 
+-static const LONGLONG kVsyncPeriod100ns = 166666LL; // 60 Hz
+-static const LONGLONG kVsyncMaxLead100ns = 333333LL;
++// Software vsync period in 100 ns units, from the adapter's RefreshRate setting.
++static LONGLONG VsyncPeriod100ns(VioGpuAdapter *adapter)
++{
++    return 10000000LL / (LONGLONG)adapter->GetRefreshRate();
++}
+ 
+ PAGED_CODE_SEG_BEGIN
+ 
+@@ -975,11 +978,16 @@
+     pVideoSignalInfo->ActiveSize = pVideoSignalInfo->TotalSize;
+ 
+ #if 1
+-    pVideoSignalInfo->VSyncFreq.Numerator = 148500000;
++    // Refresh from the adapter's RefreshRate setting (was a fixed 60 Hz 1080p timing).
++    // The original fixed 1080p60-style timing (148.5 MHz / 67.5 kHz) is what Windows accepts for
++    // every mode; scale it by the configured refresh rate (RefreshRate registry value). Unspecified
++    // or per-mode values made Windows reject the custom (host window) mode.
++    const ULONG hz = m_pAdapter->GetRefreshRate();
++    pVideoSignalInfo->VSyncFreq.Numerator = 148500000ULL * hz / 60;
+     pVideoSignalInfo->VSyncFreq.Denominator = 2475000;
+-    pVideoSignalInfo->HSyncFreq.Numerator = 67500;
++    pVideoSignalInfo->HSyncFreq.Numerator = 67500 * hz / 60;
+     pVideoSignalInfo->HSyncFreq.Denominator = 1;
+-    pVideoSignalInfo->PixelRate = 148500000;
++    pVideoSignalInfo->PixelRate = 148500000ULL * hz / 60;
+ #else
+ 
+     pVideoSignalInfo->VSyncFreq.Numerator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
+@@ -1065,7 +1073,10 @@
+         return Status;
+     }
+ 
+-    pVbeModeInfo = &m_ModeInfo[m_CurrentModeIndex];
++    // Preferred monitor mode = the host window size (custom mode) when the host reported one, so a
++    // re-plug after a resize lands on the new size directly.
++    pVbeModeInfo = &m_ModeInfo[(m_CustomModeIndex < GetModeCount() && m_ModeInfo[m_CustomModeIndex].VisScreenWidth)
++                                   ? m_CustomModeIndex : m_CurrentModeIndex];
+ 
+     BuildVideoSignalInfo(&pMonitorSourceMode->VideoSignalInfo, pVbeModeInfo);
+ 
+@@ -2006,8 +2017,9 @@
+     LARGE_INTEGER now;
+     LARGE_INTEGER due;
+     KeQuerySystemTime(&now);
+-    next_vsync_time.QuadPart = now.QuadPart + kVsyncPeriod100ns;
+-    due.QuadPart = -kVsyncPeriod100ns;
++    const LONGLONG period = VsyncPeriod100ns(m_pAdapter);
++    next_vsync_time.QuadPart = now.QuadPart + period;
++    due.QuadPart = -period;
+ 
+     KIRQL oldIrql;
+     KeAcquireSpinLock(&m_vsyncTimerLock, &oldIrql);
+@@ -2102,22 +2114,24 @@
+     LARGE_INTEGER next;
+     KeQuerySystemTime(&now);
+ 
+-    next.QuadPart = vidpn->next_vsync_time.QuadPart + kVsyncPeriod100ns;
++    const LONGLONG period = VsyncPeriod100ns(vidpn->m_pAdapter);
++    const LONGLONG max_lead = 2 * period;
++    next.QuadPart = vidpn->next_vsync_time.QuadPart + period;
+     if (next.QuadPart < now.QuadPart)
+     {
+-        next.QuadPart = now.QuadPart + kVsyncPeriod100ns;
++        next.QuadPart = now.QuadPart + period;
+     }
+-    else if (next.QuadPart > (now.QuadPart + kVsyncMaxLead100ns))
++    else if (next.QuadPart > (now.QuadPart + max_lead))
+     {
+-        next.QuadPart = now.QuadPart + kVsyncPeriod100ns;
++        next.QuadPart = now.QuadPart + period;
+     }
+     vidpn->next_vsync_time = next;
+ 
+     LARGE_INTEGER due;
+     due.QuadPart = next.QuadPart - now.QuadPart;
+-    if (due.QuadPart <= 0 || due.QuadPart > kVsyncMaxLead100ns)
++    if (due.QuadPart <= 0 || due.QuadPart > max_lead)
+     {
+-        due.QuadPart = kVsyncPeriod100ns;
++        due.QuadPart = period;
+     }
+     due.QuadPart = -due.QuadPart;
+ 
+diff -ruN a/viogpu/viogpuap/GpuAdapter.cpp b/viogpu/viogpuap/GpuAdapter.cpp
+--- a/viogpu/viogpuap/GpuAdapter.cpp	2026-10-05 09:01:42.129430646 +0200
++++ b/viogpu/viogpuap/GpuAdapter.cpp	2026-10-04 21:54:07.417214734 +0200
+@@ -1,330 +1,382 @@
+-/*
+- * Copyright (C) 2021-2022 Red Hat, Inc.
+- *
+- * Written By: Vadim Rozenfeld <vrozenfe@redhat.com>
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met :
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and / or other materials provided with the distribution.
+- * 3. Neither the names of the copyright holders nor the names of their contributors
+- *    may be used to endorse or promote products derived from this software
+- *    without specific prior written permission.
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS ``AS IS'' AND
+- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+- * ARE DISCLAIMED.IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS BE LIABLE
+- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+- * SUCH DAMAGE.
+- */
+-
+-#include "pch.h"
+-
+-GpuAdapter::GpuAdapter(const std::wstring LinkName)
+-    : m_hThread(NULL), m_hStopEvent(NULL), m_hResolutionEvent(NULL), m_hDC(NULL), m_hAdapter(NULL), m_Index(-1),
+-      m_PathArrayElements(0), m_ModeInfoArrayElements(0), m_pDisplayPathInfo(NULL), m_pDisplayModeInfo(NULL),
+-      m_Flag(None)
+-{
+-    m_DeviceName = LinkName;
+-    PrintMessage(L"%ws %ws\n", __FUNCTIONW__, m_DeviceName.c_str());
+-    Init();
+-};
+-
+-void GpuAdapter::UpdateDisplayConfig(void)
+-{
+-    PrintMessage(L"%ws\n", __FUNCTIONW__);
+-
+-    UINT32 filter = QDC_ALL_PATHS;
+-    ClearDisplayConfig();
+-
+-    if (FAILED(HRESULT_FROM_WIN32(::GetDisplayConfigBufferSizes(filter,
+-                                                                &m_PathArrayElements,
+-                                                                &m_ModeInfoArrayElements))))
+-    {
+-        PrintMessage(L"GetDisplayConfigBufferSizes faled\n");
+-        return;
+-    }
+-
+-    m_pDisplayPathInfo = new DISPLAYCONFIG_PATH_INFO[m_PathArrayElements];
+-    m_pDisplayModeInfo = new DISPLAYCONFIG_MODE_INFO[m_ModeInfoArrayElements];
+-    ZeroMemory(m_pDisplayPathInfo, sizeof(DISPLAYCONFIG_PATH_INFO) * m_PathArrayElements);
+-    ZeroMemory(m_pDisplayModeInfo, sizeof(DISPLAYCONFIG_MODE_INFO) * m_ModeInfoArrayElements);
+-
+-    if (SUCCEEDED(HRESULT_FROM_WIN32(::QueryDisplayConfig(filter,
+-                                                          &m_PathArrayElements,
+-                                                          m_pDisplayPathInfo,
+-                                                          &m_ModeInfoArrayElements,
+-                                                          m_pDisplayModeInfo,
+-                                                          NULL))))
+-    {
+-
+-        for (UINT PathIdx = 0; PathIdx < GetNumbersOfPathArrayElements(); ++PathIdx)
+-        {
+-            DISPLAYCONFIG_SOURCE_DEVICE_NAME SourceName = {};
+-            SourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+-            SourceName.header.size = sizeof(SourceName);
+-            SourceName.header.adapterId = m_pDisplayPathInfo[PathIdx].sourceInfo.adapterId;
+-            SourceName.header.id = m_pDisplayPathInfo[PathIdx].sourceInfo.id;
+-
+-            if (SUCCEEDED(HRESULT_FROM_WIN32(::DisplayConfigGetDeviceInfo(&SourceName.header))))
+-            {
+-                if (wcscmp(m_DeviceName.c_str(), SourceName.viewGdiDeviceName) == 0)
+-                {
+-                    m_Index = PathIdx;
+-                    break;
+-                }
+-            }
+-        }
+-    }
+-};
+-
+-DISPLAYCONFIG_MODE_INFO *GpuAdapter::GetDisplayConfig(UINT index)
+-{
+-    PrintMessage(L"%ws\n", __FUNCTIONW__);
+-
+-    if (index < GetNumbersOfPathArrayElements())
+-    {
+-        UINT idx = m_pDisplayPathInfo[index].sourceInfo.modeInfoIdx;
+-        PrintMessage(L"%ws m_Index %d idx %d active %d\n",
+-                     __FUNCTIONW__,
+-                     index,
+-                     idx,
+-                     m_pDisplayPathInfo[index].flags & DISPLAYCONFIG_PATH_ACTIVE);
+-        if (idx < GetNumbersOfModeInfoArrayElements())
+-        {
+-            return &m_pDisplayModeInfo[idx];
+-        }
+-    }
+-    return NULL;
+-}
+-
+-void GpuAdapter::ClearDisplayConfig(void)
+-{
+-    PrintMessage(L"%ws\n", __FUNCTIONW__);
+-
+-    delete[] m_pDisplayPathInfo;
+-    delete[] m_pDisplayModeInfo;
+-    m_pDisplayPathInfo = NULL;
+-    m_pDisplayModeInfo = NULL;
+-    m_PathArrayElements = 0;
+-    m_ModeInfoArrayElements = 0;
+-}
+-
+-void GpuAdapter::Init()
+-{
+-    PrintMessage(L"%ws\n", __FUNCTIONW__);
+-
+-    m_hStopEvent = ::CreateEvent(NULL, TRUE, FALSE, NULL);
+-    if (!m_hStopEvent)
+-    {
+-        return;
+-    }
+-
+-    m_hDC = ::CreateDC(NULL, m_DeviceName.c_str(), NULL, NULL);
+-
+-    D3DKMT_OPENADAPTERFROMHDC openAdapter = {0};
+-    openAdapter.hDc = m_hDC;
+-
+-    NTSTATUS status = D3DKMTOpenAdapterFromHdc(&openAdapter);
+-    if (NT_SUCCESS(status))
+-    {
+-        UpdateDisplayConfig();
+-        m_hAdapter = openAdapter.hAdapter;
+-        if (QueryAdapterId())
+-        {
+-            std::wstring EventName = GLOBAL_OBJECTS;
+-            EventName += RESOLUTION_EVENT_NAME;
+-            EventName += std::to_wstring(m_Index);
+-            m_hResolutionEvent = ::OpenEvent(EVENT_ALL_ACCESS | EVENT_MODIFY_STATE, FALSE, EventName.c_str());
+-            if (m_hResolutionEvent == NULL)
+-            {
+-                PrintMessage(L"Cannot open event %ws Error = %d.\n", EventName.c_str(), GetLastError());
+-                return;
+-            }
+-            m_hThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)ServiceThread, (LPVOID)this, 0, NULL);
+-            if (m_hThread == NULL)
+-            {
+-                PrintMessage(L"Cannot create thread Error = %d.\n", GetLastError());
+-                return;
+-            }
+-        }
+-    }
+-    SetStatus(Active);
+-}
+-
+-bool GpuAdapter::QueryAdapterId()
+-{
+-    PrintMessage(L"%ws\n", __FUNCTIONW__);
+-
+-    if (m_hAdapter)
+-    {
+-        VIOGPU_ESCAPE data{0};
+-        data.DataLength = sizeof(ULONG);
+-        data.Type = VIOGPU_GET_DEVICE_ID;
+-
+-        D3DKMT_ESCAPE escape = {0};
+-        escape.hAdapter = m_hAdapter;
+-        escape.pPrivateDriverData = &data;
+-        escape.PrivateDriverDataSize = sizeof(data);
+-
+-        NTSTATUS status = D3DKMTEscape(&escape);
+-        if (!NT_SUCCESS(status))
+-        {
+-            PrintMessage(L"D3DKMTEscape failed with status = 0x%x\n", status);
+-        }
+-        else
+-        {
+-            m_Index = data.Id;
+-            return true;
+-        }
+-    }
+-    return false;
+-}
+-
+-bool GpuAdapter::GetCurrentResolution(PVIOGPU_DISP_MODE mode)
+-{
+-    PrintMessage(L"%ws\n", __FUNCTIONW__);
+-
+-    DISPLAYCONFIG_MODE_INFO *pConfig = GetDisplayConfig(m_Index);
+-    if (pConfig)
+-    {
+-        mode->XResolution = (USHORT)pConfig->sourceMode.width;
+-        mode->YResolution = (USHORT)pConfig->sourceMode.height;
+-        return true;
+-    }
+-    return false;
+-}
+-
+-bool GpuAdapter::GetCustomResolution(PVIOGPU_DISP_MODE pmode)
+-{
+-    PrintMessage(L"%ws\n", __FUNCTIONW__);
+-
+-    if (m_hAdapter && pmode)
+-    {
+-        VIOGPU_ESCAPE data{0};
+-        data.DataLength = sizeof(VIOGPU_DISP_MODE);
+-        data.Type = VIOGPU_GET_CUSTOM_RESOLUTION;
+-
+-        D3DKMT_ESCAPE escape = {0};
+-        escape.hAdapter = m_hAdapter;
+-        escape.pPrivateDriverData = &data;
+-        escape.PrivateDriverDataSize = sizeof(data);
+-
+-        NTSTATUS status = D3DKMTEscape(&escape);
+-        if (NT_SUCCESS(status))
+-        {
+-            pmode->XResolution = data.Resolution.XResolution;
+-            pmode->YResolution = data.Resolution.YResolution;
+-            PrintMessage(L"%ws (%dx%d)\n", __FUNCTIONW__, pmode->XResolution, pmode->YResolution);
+-            return true;
+-        }
+-        PrintMessage(L"D3DKMTEscape failed with status = 0x%0X\n", status);
+-    }
+-    return false;
+-}
+-
+-bool GpuAdapter::SetResolution(PVIOGPU_DISP_MODE mode)
+-{
+-    PrintMessage(L"%ws\n", __FUNCTIONW__);
+-
+-    int ix = m_pDisplayPathInfo[m_Index].sourceInfo.modeInfoIdx;
+-    PrintMessage(L"%ws m_Index %d %d (%dx%d)\n", __FUNCTIONW__, m_Index, ix, mode->XResolution, mode->YResolution);
+-    m_pDisplayModeInfo[ix].sourceMode.width = mode->XResolution;
+-    m_pDisplayModeInfo[ix].sourceMode.height = mode->YResolution;
+-    SetDisplayConfig(m_PathArrayElements,
+-                     m_pDisplayPathInfo,
+-                     m_ModeInfoArrayElements,
+-                     m_pDisplayModeInfo,
+-                     SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE);
+-    return true;
+-}
+-
+-void GpuAdapter::Run()
+-{
+-    PrintMessage(L"%ws\n", __FUNCTIONW__);
+-
+-    if (m_hThread != NULL && m_hStopEvent != NULL && m_hResolutionEvent != NULL)
+-    {
+-        const HANDLE handles[] = {m_hStopEvent, m_hResolutionEvent};
+-        while (1)
+-        {
+-            if (WaitForMultipleObjects(2, handles, FALSE, INFINITE) == WAIT_OBJECT_0)
+-            {
+-                break;
+-            }
+-            VIOGPU_DISP_MODE custom = {0};
+-            UpdateDisplayConfig();
+-            if (GetCustomResolution(&custom))
+-            {
+-                VIOGPU_DISP_MODE current = {0};
+-                GetCurrentResolution(&current);
+-                SetResolution(&custom);
+-            }
+-        }
+-    }
+-}
+-
+-DWORD WINAPI GpuAdapter::ServiceThread(GpuAdapter *ptr)
+-{
+-    PrintMessage(L"%ws\n", __FUNCTIONW__);
+-
+-    ptr->Run();
+-    return 0;
+-}
+-
+-void GpuAdapter::Close()
+-{
+-    PrintMessage(L"%ws\n", __FUNCTIONW__);
+-
+-    if (m_hThread != NULL)
+-    {
+-        if (m_hStopEvent != NULL)
+-        {
+-            SetEvent(m_hStopEvent);
+-            if (WAIT_TIMEOUT == WaitForSingleObject(m_hThread, 1000))
+-            {
+-                PrintMessage(L"Cannot close thread after 1 sec\n");
+-                TerminateThread(m_hThread, 0);
+-            }
+-        }
+-        m_hThread = NULL;
+-    }
+-
+-    if (m_hStopEvent)
+-    {
+-        CloseHandle(m_hStopEvent);
+-        m_hStopEvent = NULL;
+-    }
+-
+-    if (m_hResolutionEvent)
+-    {
+-        CloseHandle(m_hResolutionEvent);
+-        m_hResolutionEvent = NULL;
+-    }
+-
+-    if (m_hAdapter)
+-    {
+-        D3DKMT_CLOSEADAPTER close = {m_hAdapter};
+-        NTSTATUS status = D3DKMTCloseAdapter(&close);
+-        if (!NT_SUCCESS(status))
+-        {
+-            PrintMessage(L"D3DKMTCloseAdapter failed with status = 0x%x.\n", status);
+-        }
+-        m_hAdapter = NULL;
+-    }
+-
+-    if (m_hDC != NULL)
+-    {
+-        ReleaseDC(NULL, m_hDC);
+-        m_hDC = NULL;
+-    }
+-}
++/*
++ * Copyright (C) 2021-2022 Red Hat, Inc.
++ *
++ * Written By: Vadim Rozenfeld <vrozenfe@redhat.com>
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met :
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and / or other materials provided with the distribution.
++ * 3. Neither the names of the copyright holders nor the names of their contributors
++ *    may be used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++#include "pch.h"
++
++GpuAdapter::GpuAdapter(const std::wstring LinkName)
++    : m_hThread(NULL), m_hStopEvent(NULL), m_hResolutionEvent(NULL), m_hDC(NULL), m_hAdapter(NULL), m_Index(-1),
++      m_PathArrayElements(0), m_ModeInfoArrayElements(0), m_pDisplayPathInfo(NULL), m_pDisplayModeInfo(NULL),
++      m_Flag(None)
++{
++    m_DeviceName = LinkName;
++    PrintMessage(L"%ws %ws\n", __FUNCTIONW__, m_DeviceName.c_str());
++    Init();
++};
++
++void GpuAdapter::UpdateDisplayConfig(void)
++{
++    PrintMessage(L"%ws\n", __FUNCTIONW__);
++
++    UINT32 filter = QDC_ONLY_ACTIVE_PATHS;
++    ClearDisplayConfig();
++
++    if (FAILED(HRESULT_FROM_WIN32(::GetDisplayConfigBufferSizes(filter,
++                                                                &m_PathArrayElements,
++                                                                &m_ModeInfoArrayElements))))
++    {
++        PrintMessage(L"GetDisplayConfigBufferSizes faled\n");
++        return;
++    }
++
++    m_pDisplayPathInfo = new DISPLAYCONFIG_PATH_INFO[m_PathArrayElements];
++    m_pDisplayModeInfo = new DISPLAYCONFIG_MODE_INFO[m_ModeInfoArrayElements];
++    ZeroMemory(m_pDisplayPathInfo, sizeof(DISPLAYCONFIG_PATH_INFO) * m_PathArrayElements);
++    ZeroMemory(m_pDisplayModeInfo, sizeof(DISPLAYCONFIG_MODE_INFO) * m_ModeInfoArrayElements);
++
++    if (SUCCEEDED(HRESULT_FROM_WIN32(::QueryDisplayConfig(filter,
++                                                          &m_PathArrayElements,
++                                                          m_pDisplayPathInfo,
++                                                          &m_ModeInfoArrayElements,
++                                                          m_pDisplayModeInfo,
++                                                          NULL))))
++    {
++
++        for (UINT PathIdx = 0; PathIdx < GetNumbersOfPathArrayElements(); ++PathIdx)
++        {
++            DISPLAYCONFIG_SOURCE_DEVICE_NAME SourceName = {};
++            SourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
++            SourceName.header.size = sizeof(SourceName);
++            SourceName.header.adapterId = m_pDisplayPathInfo[PathIdx].sourceInfo.adapterId;
++            SourceName.header.id = m_pDisplayPathInfo[PathIdx].sourceInfo.id;
++
++            if (SUCCEEDED(HRESULT_FROM_WIN32(::DisplayConfigGetDeviceInfo(&SourceName.header))))
++            {
++                if (wcscmp(m_DeviceName.c_str(), SourceName.viewGdiDeviceName) == 0)
++                {
++                    m_Index = PathIdx;
++                    break;
++                }
++            }
++        }
++    }
++};
++
++DISPLAYCONFIG_MODE_INFO *GpuAdapter::GetDisplayConfig(UINT index)
++{
++    PrintMessage(L"%ws\n", __FUNCTIONW__);
++
++    if (index < GetNumbersOfPathArrayElements())
++    {
++        UINT idx = m_pDisplayPathInfo[index].sourceInfo.modeInfoIdx;
++        PrintMessage(L"%ws m_Index %d idx %d active %d\n",
++                     __FUNCTIONW__,
++                     index,
++                     idx,
++                     m_pDisplayPathInfo[index].flags & DISPLAYCONFIG_PATH_ACTIVE);
++        if (idx < GetNumbersOfModeInfoArrayElements())
++        {
++            return &m_pDisplayModeInfo[idx];
++        }
++    }
++    return NULL;
++}
++
++void GpuAdapter::ClearDisplayConfig(void)
++{
++    PrintMessage(L"%ws\n", __FUNCTIONW__);
++
++    delete[] m_pDisplayPathInfo;
++    delete[] m_pDisplayModeInfo;
++    m_pDisplayPathInfo = NULL;
++    m_pDisplayModeInfo = NULL;
++    m_PathArrayElements = 0;
++    m_ModeInfoArrayElements = 0;
++}
++
++void GpuAdapter::Init()
++{
++    PrintMessage(L"%ws\n", __FUNCTIONW__);
++
++    m_hStopEvent = ::CreateEvent(NULL, TRUE, FALSE, NULL);
++    if (!m_hStopEvent)
++    {
++        return;
++    }
++
++    m_hDC = ::CreateDC(NULL, m_DeviceName.c_str(), NULL, NULL);
++
++    D3DKMT_OPENADAPTERFROMHDC openAdapter = {0};
++    openAdapter.hDc = m_hDC;
++
++    NTSTATUS status = D3DKMTOpenAdapterFromHdc(&openAdapter);
++    if (NT_SUCCESS(status))
++    {
++        UpdateDisplayConfig();
++        m_hAdapter = openAdapter.hAdapter;
++        if (QueryAdapterId())
++        {
++            std::wstring EventName = GLOBAL_OBJECTS;
++            EventName += RESOLUTION_EVENT_NAME;
++            EventName += std::to_wstring(m_Index);
++            m_hResolutionEvent = ::OpenEvent(EVENT_ALL_ACCESS | EVENT_MODIFY_STATE, FALSE, EventName.c_str());
++            if (m_hResolutionEvent == NULL)
++            {
++                PrintMessage(L"Cannot open event %ws Error = %d.\n", EventName.c_str(), GetLastError());
++                return;
++            }
++            m_hThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)ServiceThread, (LPVOID)this, 0, NULL);
++            if (m_hThread == NULL)
++            {
++                PrintMessage(L"Cannot create thread Error = %d.\n", GetLastError());
++                return;
++            }
++        }
++    }
++    SetStatus(Active);
++}
++
++bool GpuAdapter::QueryAdapterId()
++{
++    PrintMessage(L"%ws\n", __FUNCTIONW__);
++
++    if (m_hAdapter)
++    {
++        VIOGPU_ESCAPE data{0};
++        data.DataLength = sizeof(ULONG);
++        data.Type = VIOGPU_GET_DEVICE_ID;
++
++        D3DKMT_ESCAPE escape = {0};
++        escape.hAdapter = m_hAdapter;
++        escape.pPrivateDriverData = &data;
++        escape.PrivateDriverDataSize = sizeof(data);
++
++        NTSTATUS status = D3DKMTEscape(&escape);
++        if (!NT_SUCCESS(status))
++        {
++            PrintMessage(L"D3DKMTEscape failed with status = 0x%x\n", status);
++        }
++        else
++        {
++            m_Index = data.Id;
++            return true;
++        }
++    }
++    return false;
++}
++
++bool GpuAdapter::GetCurrentResolution(PVIOGPU_DISP_MODE mode)
++{
++    PrintMessage(L"%ws\n", __FUNCTIONW__);
++
++    DISPLAYCONFIG_MODE_INFO *pConfig = GetDisplayConfig(m_Index);
++    if (pConfig)
++    {
++        mode->XResolution = (USHORT)pConfig->sourceMode.width;
++        mode->YResolution = (USHORT)pConfig->sourceMode.height;
++        return true;
++    }
++    return false;
++}
++
++bool GpuAdapter::GetCustomResolution(PVIOGPU_DISP_MODE pmode)
++{
++    PrintMessage(L"%ws\n", __FUNCTIONW__);
++
++    if (m_hAdapter && pmode)
++    {
++        VIOGPU_ESCAPE data{0};
++        data.DataLength = sizeof(VIOGPU_DISP_MODE);
++        data.Type = VIOGPU_GET_CUSTOM_RESOLUTION;
++
++        D3DKMT_ESCAPE escape = {0};
++        escape.hAdapter = m_hAdapter;
++        escape.pPrivateDriverData = &data;
++        escape.PrivateDriverDataSize = sizeof(data);
++
++        NTSTATUS status = D3DKMTEscape(&escape);
++        if (NT_SUCCESS(status))
++        {
++            pmode->XResolution = data.Resolution.XResolution;
++            pmode->YResolution = data.Resolution.YResolution;
++            PrintMessage(L"%ws (%dx%d)\n", __FUNCTIONW__, pmode->XResolution, pmode->YResolution);
++            return true;
++        }
++        PrintMessage(L"D3DKMTEscape failed with status = 0x%0X\n", status);
++    }
++    return false;
++}
++
++bool GpuAdapter::SetResolution(PVIOGPU_DISP_MODE mode)
++{
++    if (!mode || !mode->XResolution || !mode->YResolution)
++        return false;
++
++    // Let Windows choose target timings for the new source dimensions. Reusing
++    // the old SetDisplayConfig target mode can silently preserve the old size.
++    DEVMODEW dm = {};
++    dm.dmSize = sizeof(dm);
++    if (EnumDisplaySettingsW(m_DeviceName.c_str(), ENUM_CURRENT_SETTINGS, &dm) &&
++        dm.dmPelsWidth == mode->XResolution && dm.dmPelsHeight == mode->YResolution)
++        return true;
++
++    dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT;
++    dm.dmPelsWidth = mode->XResolution;
++    dm.dmPelsHeight = mode->YResolution;
++    LONG result = ChangeDisplaySettingsExW(m_DeviceName.c_str(), &dm, NULL, CDS_UPDATEREGISTRY, NULL);
++    if (result == DISP_CHANGE_BADMODE)
++    {
++        // A host resize replaces the driver's custom mode. Force WDDM to
++        // enumerate it instead of using the previous mode cached by Windows.
++        UpdateDisplayConfig();
++        for (UINT i = 0; i < m_PathArrayElements; ++i)
++        {
++            DISPLAYCONFIG_SOURCE_DEVICE_NAME name = {};
++            name.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
++            name.header.size = sizeof(name);
++            name.header.adapterId = m_pDisplayPathInfo[i].sourceInfo.adapterId;
++            name.header.id = m_pDisplayPathInfo[i].sourceInfo.id;
++            if (DisplayConfigGetDeviceInfo(&name.header) != ERROR_SUCCESS ||
++                m_DeviceName != name.viewGdiDeviceName)
++                continue;
++            UINT source = m_pDisplayPathInfo[i].sourceInfo.modeInfoIdx;
++            if (source >= m_ModeInfoArrayElements)
++                continue;
++            m_pDisplayModeInfo[source].sourceMode.width = mode->XResolution;
++            m_pDisplayModeInfo[source].sourceMode.height = mode->YResolution;
++            m_pDisplayPathInfo[i].targetInfo.modeInfoIdx = DISPLAYCONFIG_PATH_MODE_IDX_INVALID;
++            m_pDisplayPathInfo[i].targetInfo.refreshRate.Numerator = 0;
++            m_pDisplayPathInfo[i].targetInfo.refreshRate.Denominator = 0;
++            m_pDisplayPathInfo[i].targetInfo.scanLineOrdering = DISPLAYCONFIG_SCANLINE_ORDERING_UNSPECIFIED;
++            LONG status = SetDisplayConfig(m_PathArrayElements, m_pDisplayPathInfo,
++                                          m_ModeInfoArrayElements, m_pDisplayModeInfo,
++                                          SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG |
++                                          SDC_ALLOW_CHANGES | SDC_FORCE_MODE_ENUMERATION |
++                                          SDC_SAVE_TO_DATABASE);
++            PrintMessage(L"SetDisplayConfig enumerate result=%ld\n", status);
++            result = status == ERROR_SUCCESS ? DISP_CHANGE_SUCCESSFUL : DISP_CHANGE_FAILED;
++            break;
++        }
++    }
++    PrintMessage(L"%ws %ws (%dx%d) result=%ld\n", __FUNCTIONW__, m_DeviceName.c_str(),
++                 mode->XResolution, mode->YResolution, result);
++    dm = {};
++    dm.dmSize = sizeof(dm);
++    return result == DISP_CHANGE_SUCCESSFUL &&
++           EnumDisplaySettingsW(m_DeviceName.c_str(), ENUM_CURRENT_SETTINGS, &dm) &&
++           dm.dmPelsWidth == mode->XResolution && dm.dmPelsHeight == mode->YResolution;
++}
++
++void GpuAdapter::Run()
++{
++    PrintMessage(L"%ws\n", __FUNCTIONW__);
++
++    if (m_hThread != NULL && m_hStopEvent != NULL && m_hResolutionEvent != NULL)
++    {
++        const HANDLE handles[] = {m_hStopEvent, m_hResolutionEvent};
++        // Apply the host-requested size once at start: the host announces its window size before
++        // this agent runs, so that resolution event is never seen. Afterwards wait for changes.
++        bool apply_now = true;
++        bool retry = false;
++        while (1)
++        {
++            if (!apply_now)
++            {
++                DWORD wait = WaitForMultipleObjects(2, handles, FALSE, retry ? 1000 : INFINITE);
++                if (wait != WAIT_OBJECT_0 + 1 && wait != WAIT_TIMEOUT)
++                    break;
++            }
++            apply_now = false;
++            ResetEvent(m_hResolutionEvent);
++            VIOGPU_DISP_MODE custom = {0};
++            retry = true;
++            if (GetCustomResolution(&custom))
++            {
++                // The first desktop mode set can race sign-in and mode-list
++                // refresh. Retry failures even if the host does not resize again.
++                retry = !SetResolution(&custom);
++            }
++        }
++    }
++}
++
++DWORD WINAPI GpuAdapter::ServiceThread(GpuAdapter *ptr)
++{
++    PrintMessage(L"%ws\n", __FUNCTIONW__);
++
++    ptr->Run();
++    return 0;
++}
++
++void GpuAdapter::Close()
++{
++    PrintMessage(L"%ws\n", __FUNCTIONW__);
++
++    if (m_hThread != NULL)
++    {
++        if (m_hStopEvent != NULL)
++        {
++            SetEvent(m_hStopEvent);
++            if (WAIT_TIMEOUT == WaitForSingleObject(m_hThread, 1000))
++            {
++                PrintMessage(L"Cannot close thread after 1 sec\n");
++                TerminateThread(m_hThread, 0);
++            }
++        }
++        m_hThread = NULL;
++    }
++
++    if (m_hStopEvent)
++    {
++        CloseHandle(m_hStopEvent);
++        m_hStopEvent = NULL;
++    }
++
++    if (m_hResolutionEvent)
++    {
++        CloseHandle(m_hResolutionEvent);
++        m_hResolutionEvent = NULL;
++    }
++
++    if (m_hAdapter)
++    {
++        D3DKMT_CLOSEADAPTER close = {m_hAdapter};
++        NTSTATUS status = D3DKMTCloseAdapter(&close);
++        if (!NT_SUCCESS(status))
++        {
++            PrintMessage(L"D3DKMTCloseAdapter failed with status = 0x%x.\n", status);
++        }
++        m_hAdapter = NULL;
++    }
++
++    if (m_hDC != NULL)
++    {
++        ReleaseDC(NULL, m_hDC);
++        m_hDC = NULL;
++    }
++}
+diff -ruN a/viogpu/viogpuap/GpuAdaptersMgr.cpp b/viogpu/viogpuap/GpuAdaptersMgr.cpp
+--- a/viogpu/viogpuap/GpuAdaptersMgr.cpp	2026-10-05 09:01:42.129609855 +0200
++++ b/viogpu/viogpuap/GpuAdaptersMgr.cpp	2026-10-04 21:45:12.463428289 +0200
+@@ -56,10 +56,7 @@
+ {
+     PrintMessage(L"%ws\n", __FUNCTIONW__);
+ 
+-    DWORD index = *adapterIndex;
+-    (*adapterIndex)++;
+-
+-    if (GetDisplayDevice(NULL, index, lpDisplayDevice, 0))
++    while (GetDisplayDevice(NULL, (*adapterIndex)++, lpDisplayDevice, 0))
+     {
+         if (!name.empty() && !_wcsnicmp(lpDisplayDevice->DeviceID, name.c_str(), name.size()))
+         {

@@ -1,0 +1,19 @@
+=======================================================
+    vkmark 2025.01
+=======================================================
+    Vendor ID:      0x10005
+    Device ID:      0x0
+    Device Name:    Apple M1 Max (G13C C0)
+    Driver Version: 109060099
+    Device UUID:    8fa77fc161f66cba16dc9f9c846c146a
+=======================================================
+[vertex] duration=5: FPS: 3092 FrameTime: 0.323 ms
+[texture] duration=5: FPS: 3227 FrameTime: 0.310 ms
+[shading] duration=5: FPS: 2879 FrameTime: 0.347 ms
+[cube] duration=5: FPS: 3469 FrameTime: 0.288 ms
+[effect2d] duration=5: FPS: 1398 FrameTime: 0.715 ms
+[desktop] duration=5: FPS: 2899 FrameTime: 0.345 ms
+[clear] duration=5: FPS: 5601 FrameTime: 0.179 ms
+=======================================================
+                                   vkmark Score: 3223
+=======================================================

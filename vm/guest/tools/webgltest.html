@@ -1,0 +1,80 @@
+<!doctype html><meta charset="utf-8"><title>webgltest</title>
+<canvas id="c" width="256" height="256"></canvas><pre id="out"></pre>
+<script>
+// Deterministic WebGL checks with readPixels. window.result holds a summary string.
+const c = document.getElementById('c');
+const gl = c.getContext('webgl', { antialias: false, depth: true, stencil: false, preserveDrawingBuffer: true });
+const out = [];
+function log(s) { out.push(s); document.getElementById('out').textContent = out.join('\n'); }
+function px(x, y) { const p = new Uint8Array(4); gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, p); return Array.from(p).join(','); }
+function prog(vs, fs) {
+  const p = gl.createProgram();
+  for (const [t, s] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+    const sh = gl.createShader(t); gl.shaderSource(sh, s); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) log('shader error: ' + gl.getShaderInfoLog(sh));
+    gl.attachShader(p, sh);
+  }
+  gl.bindAttribLocation(p, 0, 'pos'); gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) log('link error: ' + gl.getProgramInfoLog(p));
+  return p;
+}
+function check(name, expect) {
+  // quadrant centres: TL TR BL BR (GL origin bottom-left)
+  const got = [px(64, 192), px(192, 192), px(64, 64), px(192, 64)].map(v => v === '0,255,0,255' ? 'G' : v === '0,0,255,255' ? '-' : '?' + v);
+  const ok = got.join('') === expect;
+  log(`${ok ? 'ok  ' : 'FAIL'} ${name}: ${got.join(' ')} (want ${expect.split('').join(' ')})`);
+  return ok;
+}
+let fails = 0;
+if (!gl) { window.result = 'no webgl'; } else {
+  const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+  log('renderer: ' + (dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)));
+  const p = prog('attribute vec3 pos; uniform vec2 off; void main(){ gl_Position = vec4(pos.xy + off, pos.z, 1.0); }',
+                 'precision mediump float; void main(){ gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0); }');
+  gl.useProgram(p);
+  const off = gl.getUniformLocation(p, 'off');
+  const quad = (x, y) => [x, y, 0.5, x + 0.9, y, 0.5, x, y + 0.9, 0.5, x + 0.9, y, 0.5, x + 0.9, y + 0.9, 0.5, x, y + 0.9, 0.5];
+  const start = () => { gl.viewport(0, 0, 256, 256); gl.clearColor(0, 0, 1, 1); gl.clearDepth(1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT); };
+  const vb = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+
+  start(); gl.uniform2f(off, 0, 0);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(quad(-0.95, 0.05)), gl.STATIC_DRAW); gl.drawArrays(gl.TRIANGLES, 0, 6);
+  fails += !check('one quad TL', 'G---');
+
+  start(); gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LESS);
+  gl.drawArrays(gl.TRIANGLES, 0, 6); gl.disable(gl.DEPTH_TEST);
+  fails += !check('depth test on', 'G---');
+
+  start();
+  const qs = [[-0.95, 0.05], [0.05, 0.05], [-0.95, -0.95], [0.05, -0.95]];
+  for (const [x, y] of qs) { gl.bufferSubData(gl.ARRAY_BUFFER, 0, new Float32Array(quad(x, y))); gl.drawArrays(gl.TRIANGLES, 0, 6); }
+  fails += !check('bufferSubData per draw', 'GGGG');
+
+  start(); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(quad(-0.95, 0.05)), gl.DYNAMIC_DRAW);
+  for (const [x, y] of [[0, 0], [1, 0], [0, -1], [1, -1]]) { gl.uniform2f(off, x, y); gl.drawArrays(gl.TRIANGLES, 0, 6); }
+  gl.uniform2f(off, 0, 0);
+  fails += !check('uniform per draw', 'GGGG');
+
+  start(); const ib = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
+  const all = []; qs.forEach(([x, y]) => all.push(...quad(x, y)));
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(all), gl.STATIC_DRAW);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([...Array(24).keys()]), gl.STATIC_DRAW);
+  for (let i = 0; i < 4; i++) gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, i * 12);
+  fails += !check('drawElements u16 offsets', 'GGGG');
+
+  start(); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint8Array([...Array(24).keys()]), gl.STATIC_DRAW);
+  for (let i = 0; i < 4; i++) gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_BYTE, i * 6);
+  fails += !check('drawElements u8 (converted by ANGLE)', 'GGGG');
+
+  start(); gl.disableVertexAttribArray(0); gl.vertexAttrib3f(0, 0, 0, 0.5);
+  gl.drawArrays(gl.TRIANGLES, 0, 6); gl.enableVertexAttribArray(0);
+  fails += !check('disabled attribute (constant) draws nothing visible', '----');
+
+  start(); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(all), gl.STATIC_DRAW);
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, new Float32Array(quad(0.05, -0.95))); // replace quad 0 by quad 3 position
+  gl.drawArrays(gl.TRIANGLES, 0, 18);
+  fails += !check('bufferSubData then single draw', '-GGG');
+  window.result = `fails=${fails} | ` + out.join(' | ');
+}
+</script>

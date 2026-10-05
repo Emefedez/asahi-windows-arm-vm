@@ -1,0 +1,17 @@
+# VM state and secrets: never commit these
+*.qcow2
+*.fd
+*.iso
+tpm/
+credentials
+unattend/
+*.sock
+*.log
+
+# Build outputs
+*.so
+*.exe
+*.dll
+*.o
+*.obj
+__pycache__/

@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Name=Windows VM Manager
+Comment=Choose and manage named Windows ARM virtual machines
+Exec=@HOME@/.local/bin/omarchy-windows-vm-manager
+Icon=computer
+Terminal=false
+Categories=System;Emulator;
+Keywords=windows;vm;qemu;win11;
+Actions=menu;stop;
+
+[Desktop Action menu]
+Name=Open VM Manager
+Exec=@HOME@/.local/bin/omarchy-windows-vm-manager
+
+[Desktop Action stop]
+Name=Guest shutdown
+Exec=@HOME@/VMs/windows-arm/win-arm.sh stop

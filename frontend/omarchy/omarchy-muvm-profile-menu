@@ -1,0 +1,30 @@
+#!/bin/bash
+set -euo pipefail
+
+config_dir=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy
+profile_file=$config_dir/muvm-profile
+current=balanced
+[[ -r $profile_file ]] && read -r current < "$profile_file"
+
+case "$current" in
+  lean) current_label="Lean" ;;
+  balanced) current_label="Balanced" ;;
+  maximum) current_label="Maximum" ;;
+  *) current_label="Balanced" ;;
+esac
+
+choice=$(omarchy-menu-select "muvm resources · $current_label" \
+  $'\tBalanced\t24 GB RAM · 15 GB VRAM · best default' \
+  $'\tMaximum\t28 GB RAM · 24 GB VRAM · more headroom, not more speed' \
+  $'\tLean\t12 GB RAM · 8 GB VRAM · lower footprint' -- --width 560)
+
+case "$choice" in
+  Balanced*) profile=balanced ;;
+  Maximum*) profile=maximum ;;
+  Lean*) profile=lean ;;
+  *) exit 0 ;;
+esac
+
+mkdir -p "$config_dir"
+printf '%s\n' "$profile" > "$profile_file"
+notify-send "muvm profile: $profile" "Applies next launch. Guest page size remains 4K."

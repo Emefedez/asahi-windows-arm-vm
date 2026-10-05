@@ -1,0 +1,10 @@
+[terrain] duration=8: FPS: 462 FrameTime: 2.165 ms
+[refract] duration=6: FPS: 450 FrameTime: 2.224 ms
+[jellyfish] duration=5: FPS: 1395 FrameTime: 0.717 ms
+[effect2d] duration=6: FPS: 1053 FrameTime: 0.950 ms
+[shading] duration=6: FPS: 2377 FrameTime: 0.421 ms
+[terrain] duration=8: FPS: 472 FrameTime: 2.123 ms
+[refract] duration=6: FPS: 450 FrameTime: 2.225 ms
+[jellyfish] duration=5: FPS: 1397 FrameTime: 0.716 ms
+[effect2d] duration=6: FPS: 1012 FrameTime: 0.988 ms
+[shading] duration=6: FPS: 2486 FrameTime: 0.402 ms

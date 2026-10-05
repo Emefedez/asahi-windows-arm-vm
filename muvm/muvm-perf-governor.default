@@ -1,0 +1,6 @@
+# Governor applied while a muvm VM ("libkrun VM") is running.
+GOVERNOR=performance
+# Clusters to boost: policy0 = E-cores 0-1, policy2/policy6 = P-cores 2-5/6-9.
+POLICIES="/sys/devices/system/cpu/cpufreq/policy*"
+# Seconds between checks.
+INTERVAL=2

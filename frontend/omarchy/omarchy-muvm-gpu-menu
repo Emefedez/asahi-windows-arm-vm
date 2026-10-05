@@ -1,0 +1,23 @@
+#!/bin/bash
+set -euo pipefail
+
+config_dir=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy
+gpu_file=$config_dir/muvm-gpu-mode
+current=drm
+[[ -r $gpu_file ]] && read -r current < "$gpu_file"
+
+choice=$(omarchy-menu-select "muvm GPU · current: $current" \
+  $'\tDRM native\tfastest Asahi path · use when stable' \
+  $'\tVenus\tcompatibility path · try for DRM stalls/hangs' \
+  $'\tSoftware\tCPU rendering · diagnostic, usually slower' -- --width 560)
+
+case "$choice" in
+  DRM*) mode=drm ;;
+  Venus*) mode=venus ;;
+  Software*) mode=software ;;
+  *) exit 0 ;;
+esac
+
+mkdir -p "$config_dir"
+printf '%s\n' "$mode" > "$gpu_file"
+notify-send "muvm GPU mode: $mode" "Applies to Steam, STM32CubeIDE, and other managed apps on next launch."

@@ -1,0 +1,3 @@
+# Let the logged-in (active seat) user open USB devices, so QEMU can pass them through to the
+# Windows VM (win-arm.sh usb attach). systemd-logind applies the ACL via the uaccess tag.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", TAG+="uaccess"

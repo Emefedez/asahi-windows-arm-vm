@@ -1,0 +1,4 @@
+[effect2d] duration=6: FPS: 694 FrameTime: 1.441 ms
+[shading] duration=6: FPS: 1530 FrameTime: 0.654 ms
+[texture] duration=6: FPS: 1722 FrameTime: 0.581 ms
+                                   vkmark Score: 1315

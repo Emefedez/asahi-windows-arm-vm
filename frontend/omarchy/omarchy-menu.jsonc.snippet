@@ -1,0 +1,10 @@
+// Add these entries to ~/.config/omarchy/extensions/omarchy-menu.jsonc (inside the top-level object).
+  "setup.muvm-resources": {"icon":"󰍛","label":"muvm Resources","aliases":["muvm","vm-memory","vm-vram","page-size"],"description":"Choose RAM and VRAM for Steam ARM and STM32CubeIDE; guest pages remain 4K","action":"$HOME/.local/bin/omarchy-muvm-profile-menu"},
+  "apps.windows-vm-manager": {"icon":"󰍹","label":"Windows VM Manager","aliases":["windows","win11","qemu","windows-arm","vm-manager"],"description":"Choose and manage named Windows VMs, power state, resources, and disk size","action":"$HOME/.local/bin/omarchy-windows-vm-manager"},
+  "setup.muvm-gpu-mode": {
+    "icon": "󰢮",
+    "label": "muvm GPU Mode",
+    "aliases": ["muvm-gpu", "venus", "drm-gpu", "software-gpu"],
+    "description": "Choose GPU mode for Steam and STM32CubeIDE",
+    "action": "$HOME/.local/bin/omarchy-muvm-gpu-menu"
+  },

@@ -1,0 +1,21 @@
+# Windows ARM VM settings (read by win-arm.sh; edit here or via Windows VM Manager)
+# vCPUs, pinned to the 8 P-cores
+VCPUS=6
+# RAM in MiB
+MEM=8192
+# 2d = virtio-gpu display driver; 3d = Venus/blob for the Yttrium 3D driver
+GPU=3d
+# Host-visible GPU memory aperture for 3d mode
+HOSTMEM=4G
+# Start fullscreen (yes/no); Ctrl+Alt+F toggles in the window
+FULLSCREEN=no
+# Performance profile: eco | balanced | performance (P-cores are pinned separately)
+PERF=performance
+# Display scale: auto (= 1/monitor scale, sharp on HiDPI) or a number such as 1
+SCALE=auto
+# Guest refresh rate: 60 (safe default) or 120 (matches ProMotion panels; applied after a Windows restart)
+REFRESH=60
+# Host folders shared into Windows (virtio-fs): Tag=/path,Tag2=/path2  (empty = none)
+SHARES=Documents=~/Documents,Downloads=~/Downloads
+# USB devices passed through automatically (VID:PID list, see: win-arm.sh usb list)
+USB_AUTO=

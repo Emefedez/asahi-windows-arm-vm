@@ -1,0 +1,167 @@
+#!/bin/bash
+# Omarchy menu for the Windows 11 ARM VM in ~/VMs/windows-arm (QEMU/KVM).
+# All state changes go through win-arm.sh (start/stop/perf/memory/set/info).
+set -euo pipefail
+
+vm_dir=$HOME/VMs/windows-arm
+vm=$vm_dir/win-arm.sh
+helper_src=$vm_dir/host/muvm-perf-governor
+
+declare -A I=()
+load_info() { I=(); while IFS='=' read -r k v; do [[ -n $k ]] && I[$k]=$v; done < <("$vm" info | tr ' ' '\n'); }
+gb() { awk -v m="$1" 'BEGIN { printf (m % 1024 ? "%.1f GB" : "%d GB"), m / 1024 }'; }
+is_running() { [[ ${I[state]} == running ]]; }
+later() { is_running && notify-send "Windows VM" "$1 — applies on next start (restart the VM)"; return 0; }
+
+perf_menu() {
+  local c
+  c=$(omarchy-menu-select "Performance profile · current: ${I[perf]}$(is_running && echo ' · applies live')" \
+    "󰾆	Eco	CPU boost capped; quiet, saves battery" \
+    "󰾅	Balanced	moderate CPU floor (default)" \
+    "󰓅	Performance	max CPU clocks + host performance governor") || return 0
+  case $c in
+    Eco*) "$vm" perf eco ;;
+    Balanced*) "$vm" perf balanced ;;
+    Performance*)
+      "$vm" perf performance
+      [[ ${I[governor_helper]} == yes ]] ||
+        notify-send "Windows VM" "Host governor boost needs a one-time install: Windows VM > Resources > Install host CPU boost + Performance power profile" ;;
+  esac
+}
+
+memory_live_menu() {
+  local max=${I[mem]} c opts=()
+  for pct in 100 75 50 25; do opts+=("$(gb $(( max * pct / 100 )))	${pct}% of $(gb "$max")"); done
+  c=$(omarchy-menu-select "Live memory limit · now $(gb "${I[balloon]:-$max}") (balloon)" "${opts[@]}") || return 0
+  local pct=${c##*	}; pct=${pct%%%*}
+  "$vm" memory $(( max * pct / 100 ))
+}
+
+usb_menu() {
+  local attached opts=() line vp name acc c
+  attached=$("$vm" usb attached 2>/dev/null)
+  while IFS= read -r line; do
+    [[ -z $line ]] && continue
+    vp=${line%% |*}; name=${line#* | }; name=${name% | access=*}; acc=${line##*access=}
+    if grep -q "usb-${vp/:/-}" <<<"$attached"; then
+      opts+=("󰗮	$name	$vp · attached to Windows (select to detach)")
+    elif [[ $acc == yes ]]; then
+      opts+=("󰕓	$name	$vp · on Linux (select to attach)")
+    else
+      opts+=("󰕓	$name	$vp · no access yet: install USB access below")
+    fi
+  done < <("$vm" usb list)
+  opts+=("󰒓	Allow USB passthrough	one-time, needs sudo (udev rule)")
+  c=$(omarchy-menu-select "USB devices · Windows VM" "${opts[@]}") || return 0
+  case $c in
+    Allow*)
+      xdg-terminal-exec --app-id=org.omarchy.terminal bash -c \
+        "$vm_dir/host/install-usb-access.sh; read -rp 'Press Enter to close'" ;;
+    *)
+      vp=$(grep -oE '[0-9a-f]{4}:[0-9a-f]{4}' <<<"$c" | head -1)
+      [[ -n $vp ]] || return 0
+      if [[ $c == *"attached to Windows"* ]]; then
+        "$vm" usb detach "$vp" >/dev/null; notify-send "Windows VM" "USB $vp returned to Linux"
+      else
+        out=$("$vm" usb attach "$vp" 2>&1); notify-send "Windows VM" "USB $vp → Windows${out:+: $out}"
+      fi ;;
+  esac
+}
+
+resources_menu() {
+  local c
+  while :; do
+    load_info
+    local opts=(
+      "󰍛	vCPUs	${I[vcpus]} of 8 P-cores"
+      "󰘚	Memory	$(gb "${I[mem]}") at boot"
+    )
+    is_running && opts+=("󰘚	Live memory limit	$(gb "${I[balloon]:-${I[mem]}}") now (balloon)")
+    opts+=(
+      "󰢮	GPU mode	${I[gpu]}"
+      "󰾲	3D GPU memory	${I[hostmem]} host-visible aperture"
+      "󰍹	Display scale	${I[scale]}"
+      "󰑓	Display refresh	${I[refresh]:-60} Hz (applies after Windows restarts)"
+      "󰊓	Start fullscreen	${I[fullscreen]}"
+    )
+    [[ ${I[governor_helper]} == yes ]] || opts+=("󰒓	Install host CPU boost + Performance power profile	needs sudo, opens a terminal")
+    opts+=("󰈙	Edit vm.conf")
+    c=$(omarchy-menu-select "Windows VM resources$(is_running && echo ' · boot settings apply on next start')" "${opts[@]}") || return 0
+    case $c in
+      vCPUs*)
+        v=$(omarchy-menu-select "vCPUs · current: ${I[vcpus]} (8 leaves no P-core for QEMU's own threads)" 2 4 6 8) &&
+          { "$vm" set VCPUS "$v"; later "vCPUs = $v"; } ;;
+      Live\ memory*) memory_live_menu ;;
+      Memory*)
+        m=$(omarchy-menu-select "Memory at boot · current: $(gb "${I[mem]}")" "4 GB" "6 GB" "8 GB" "12 GB" "16 GB" "20 GB") &&
+          { "$vm" set MEM $(( ${m%% *} * 1024 )); later "Memory = $m"; } ;;
+      GPU\ mode*)
+        case $(omarchy-menu-select "GPU mode · current: ${I[gpu]}" \
+                 "2D	virtio-gpu display driver (stable)" \
+                 "3D	Venus for Yttrium D3D/Vulkan (experimental)") in
+          2D*) "$vm" set GPU 2d; later "GPU mode = 2D" ;;
+          3D*) "$vm" set GPU 3d; later "GPU mode = 3D" ;;
+        esac ;;
+      3D\ GPU*)
+        h=$(omarchy-menu-select "3D GPU memory aperture · current: ${I[hostmem]}" 2G 4G 8G 12G) &&
+          { "$vm" set HOSTMEM "$h"; later "3D GPU memory = $h"; } ;;
+      Display\ refresh*)
+        case $(omarchy-menu-select "Display refresh · current: ${I[refresh]:-60} Hz" \
+                 "60	known good" \
+                 "120	smoother, experimental (report purple flashes)") in
+          60*) notify-send "Windows VM" "$("$vm" refresh 60)" ;;
+          120*) notify-send "Windows VM" "$("$vm" refresh 120)" ;;
+        esac ;;
+      Display*)
+        case $(omarchy-menu-select "Display scale · current: ${I[scale]}" \
+                 "auto	sharp: guest uses physical pixels (set Windows scaling to 200%)" \
+                 "1	guest uses logical pixels (larger, softer)") in
+          auto*) "$vm" set SCALE auto; later "Display scale = auto" ;;
+          1*) "$vm" set SCALE 1; later "Display scale = 1" ;;
+        esac ;;
+      Start\ fullscreen*)
+        [[ ${I[fullscreen]} == yes ]] && "$vm" set FULLSCREEN no || "$vm" set FULLSCREEN yes ;;
+      Install*)
+        xdg-terminal-exec --app-id=org.omarchy.terminal bash -c \
+          "$HOME/Work/asahi-performance/power-profiles/install.sh; read -rp 'Press Enter to close'" ;;
+      Edit*) omarchy-launch-editor "$vm_dir/vm.conf"; return 0 ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+load_info
+summary="${I[perf]} · ${I[vcpus]} vCPU · $(gb "${I[mem]}") · GPU ${I[gpu]}"
+if is_running; then
+  choice=$(omarchy-menu-select "Windows VM · running · $summary · governor ${I[governor]}" \
+    "󰍹	Show window" \
+    "󰓅	Performance	${I[perf]} (live)" \
+    "󰍛	Resources	vCPUs, memory, GPU, display" \
+    "󰗮	USB devices	pass through to Windows" \
+    "󰐥	Shut down" \
+    "󰜉	Restart" \
+    "󰅚	Force off" \
+    "󰉋	Shared folder (host → guest)") || exit 0
+  case "$choice" in
+    Show*) "$vm" start ;;
+    Performance*) perf_menu ;;
+    Resources*) resources_menu ;;
+    USB*) usb_menu ;;
+    Shut*) "$vm" stop; notify-send "Windows VM" "Shutdown requested" ;;
+    Restart*) echo system_reset | socat - UNIX-CONNECT:"$vm_dir/monitor.sock" >/dev/null ;;
+    Force*) "$vm" kill; notify-send "Windows VM" "Powered off" ;;
+    Shared*) xdg-open "$vm_dir/share" ;;
+  esac
+else
+  choice=$(omarchy-menu-select "Windows VM · stopped · $summary" \
+    "󰐊	Start	$summary" \
+    "󰓅	Performance	${I[perf]}" \
+    "󰍛	Resources	vCPUs, memory, GPU, display" \
+    "󰉋	Shared folder (host → guest)") || exit 0
+  case "$choice" in
+    Start*) setsid -f uwsm-app -- "$vm" start >>"$vm_dir/vm.log" 2>&1; notify-send "Windows VM" "Starting ($summary)" ;;
+    Performance*) perf_menu ;;
+    Resources*) resources_menu ;;
+    Shared*) xdg-open "$vm_dir/share" ;;
+  esac
+fi

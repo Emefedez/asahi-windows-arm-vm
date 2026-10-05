@@ -1,0 +1,8 @@
+#!/bin/bash
+set -euo pipefail
+# Apply the measured Steam/VM performance setting to every muvm launch.
+# The existing muvm-perf-governor service supplies the CPU governor boost.
+if command -v uclampset >/dev/null; then
+  exec uclampset -m 1024 /usr/bin/muvm "$@"
+fi
+exec /usr/bin/muvm "$@"

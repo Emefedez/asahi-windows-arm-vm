@@ -1,0 +1,53 @@
+#!/bin/bash
+set -euo pipefail
+
+app=${1:?usage: muvm-profile-run <steam|stm32> [muvm arguments...]}
+shift
+
+profile_file=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/muvm-profile
+profile=balanced
+[[ -r $profile_file ]] && read -r profile < "$profile_file"
+gpu_file=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/muvm-gpu-mode
+gpu_mode=drm
+[[ -r $gpu_file ]] && read -r gpu_mode < "$gpu_file"
+
+case "$profile" in
+  lean)     resources=(--mem=12288 --vram=8192) ;;
+  balanced) resources=(--mem=24576 --vram=15360) ;;
+  maximum)  resources=(--mem=28672 --vram=24576) ;;
+  *)        resources=(--mem=24576 --vram=15360) ;;
+esac
+
+case "$app" in
+  steam|stm32) ;;
+  *) printf 'Unknown muvm application profile: %s\n' "$app" >&2; exit 2 ;;
+esac
+
+case "$gpu_mode" in
+  drm|venus|software) ;;
+  *) gpu_mode=drm ;;
+esac
+
+# muvm owns an advisory lock and can forward a launch to its existing VM.
+# Never unlink/rename it: the VMM changes its process name to "libkrun VM",
+# so a pgrep for muvm cannot establish that the lock is stale.
+# Do not silently retry applications or replace hardware with CPU rendering.
+gpu_env=()
+if [[ $gpu_mode == venus ]]; then
+  [[ -r /usr/share/vulkan/icd.d/virtio_icd.json ]] || {
+    printf 'Venus requires the vulkan-virtio package.\n' >&2
+    exit 1
+  }
+  # Let the Vulkan loader select the matching architecture's ICD. Absolute
+  # host ICD paths can break applications inside Steam's runtime container.
+  gpu_env=(--env=MESA_LOADER_DRIVER_OVERRIDE=zink)
+fi
+printf 'Starting %s with requested GPU mode %s (an existing VM keeps its mode).\n' "$app" "$gpu_mode" >&2
+# The VMM's GPU worker/vCPU threads sit on the critical path of every guest GPU
+# submission but each looks only ~30% busy, so schedutil keeps their cores slow,
+# the GPU idles between jobs and its firmware DVFS clocks down too. A minimum
+# utilization clamp (inherited by all VM threads) makes schedutil run them fast.
+# Measured 2026-10-04: glmark2 terrain 318 -> 424 FPS in the DRM guest.
+uclamp=()
+command -v uclampset >/dev/null && uclamp=(uclampset -m 1024)
+exec "${uclamp[@]}" /usr/bin/muvm --gpu-mode="$gpu_mode" "${resources[@]}" "${gpu_env[@]}" "$@"
