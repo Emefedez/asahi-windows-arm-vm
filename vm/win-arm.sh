@@ -78,7 +78,7 @@ case $mode in
   stop)   running && monitor system_powerdown; exit 0 ;;
   kill)   running && monitor quit; exit 0 ;;
   set)
-    [[ ${2:-} =~ ^(VCPUS|MEM|GPU|HOSTMEM|FULLSCREEN|PERF|SCALE)$ ]] || { echo "unknown setting ${2:-}" >&2; exit 2; }
+    [[ ${2:-} =~ ^(VCPUS|MEM|GPU|HOSTMEM|FULLSCREEN|PERF|SCALE|REFRESH|ISO|WIN_ISO)$ ]] || { echo "unknown setting ${2:-}" >&2; exit 2; }
     set_conf "$2" "${3:?value}"; exit 0 ;;
   perf)
     [[ ${2:-} =~ ^(eco|balanced|performance)$ ]] || { echo "usage: $0 perf eco|balanced|performance" >&2; exit 2; }
