@@ -40,7 +40,8 @@ Everything here was measured on one machine.
 | WebGL Aquarium in Edge | blank / exploded geometry | **renders correctly; 60 fps at 60 Hz, 120 fps at 120 Hz** |
 | Display | fixed modes, software cursor | **follows the window both ways, hardware cursor, 60/120 Hz** |
 
-Plus host folder sharing (virtio-fs → drive letters), USB passthrough, an Omarchy menu and a Tk manager app.
+Plus host folder sharing (virtio-fs → drive letters), USB passthrough, an Omarchy menu and a Tk manager app
+([qemu-vm-manager](https://github.com/Emefedez/qemu-vm-manager), its own repo now).
 
 ## Read this first
 
@@ -68,7 +69,7 @@ vm/                   Windows VM launcher (win-arm.sh), config, guest-agent/scre
 vm/host/              GTK resize shim (LD_PRELOAD), USB udev rule, Mesa redeploy pipeline
 vm/guest/setup/       PowerShell run inside Windows: build tools, build + install the driver, DXVK/vkd3d per game
 vm/guest/tools/       in-guest test tools (WebGL checks, Edge DevTools driver, GPU-raster flag)
-frontend/             Omarchy menu, "Windows VM Manager" Tk app, desktop entry, menu snippet
+frontend/             Omarchy menu, desktop entry, menu snippet (the Tk manager moved to Emefedez/qemu-vm-manager)
 patches/              Mesa (virtio-win-mesa) and Yttrium kernel-driver patches, with their base commits
 build/                llvm-mingw cross files, ARM64X link scripts, version resource, test probes (C)
 system/              package list, UEFI firmware installer, FEX-2609 binfmt setup (root-level pieces)

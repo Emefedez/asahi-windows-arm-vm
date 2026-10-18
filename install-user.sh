@@ -29,6 +29,9 @@ echo "Frontend:"
 for f in omarchy-windows-vm-menu omarchy-windows-vm-manager windows-vm-manager.py; do
   inst 755 "$here/frontend/$f" "$HOME/.local/bin/$f"
 done
+# The Tk manager itself is in https://github.com/Emefedez/qemu-vm-manager (windows-vm-manager.py starts it).
+[[ -e $HOME/.local/bin/qemu-vm-manager.py ]] ||
+  echo "note: install the QEMU VM Manager from https://github.com/Emefedez/qemu-vm-manager for the GUI" >&2
 for f in "$here"/frontend/omarchy/omarchy-muvm-*; do inst 755 "$f" "$HOME/.local/bin/$(basename "$f")"; done
 tmp=$(mktemp); sed "s|@HOME@|$HOME|g" "$here/frontend/windows-arm-vm.desktop" >"$tmp"
 inst 644 "$tmp" "$HOME/.local/share/applications/windows-arm-vm.desktop"; rm -f "$tmp"

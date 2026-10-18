@@ -85,10 +85,12 @@ the device nodes: `sudo host/install-usb-access.sh` installs a `uaccess` udev ru
 
 - **Omarchy menu** (`frontend/omarchy-windows-vm-menu`): start/stop, performance profile, memory, display
   refresh, USB devices. Add the entries from `frontend/omarchy/omarchy-menu.jsonc.snippet`.
-- **Windows VM Manager** (`frontend/windows-vm-manager.py`, Tk): named VM profiles
-  (`~/.config/windows-vm-manager.json`), start/suspend/resume/restart/shutdown/power off, boot resources, live
-  balloon memory, GPU mode, display scale and refresh, performance presets, and qcow2 size and growth.
-  Closing the manager leaves the VM running.
+- **QEMU VM Manager** (Tk GUI + MCP server) now lives in its own repo,
+  [Emefedez/qemu-vm-manager](https://github.com/Emefedez/qemu-vm-manager): any number of VMs, snapshots,
+  disks/ISOs, USB, shares, networking, and guest kits. Its Windows kit generalises this repo's setup
+  (TPM, UEFI, unattended install, virtio-win, guest agent) for any host, and on an Asahi host adds this
+  repo's Yttrium/build scripts from `vm/guest/setup`. `frontend/windows-vm-manager.py` is kept as a
+  compatibility wrapper that starts it.
 - `frontend/windows-arm-vm.desktop`: app-launcher entry.
 
 ## Disk
